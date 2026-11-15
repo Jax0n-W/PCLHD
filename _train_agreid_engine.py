@@ -36,6 +36,11 @@ from clustercontrast.utils.data.dynamic_agva import (
     add_dynamic_agva_arguments, get_dynamic_agva_process,
     print_dynamic_agva_config, validate_dynamic_agva_args,
 )
+from clustercontrast.utils.data.resolution_augment import (
+    add_resolution_augment_arguments, append_resolution_log_suffix,
+    build_resolution_augmenters, print_resolution_stats,
+    reset_resolution_stats, validate_resolution_augment_args,
+)
 from clustercontrast.utils.logging import Logger
 from clustercontrast.utils.clustering import (
     append_eps_log_suffix, append_stage2_eps_log_suffix,
@@ -218,7 +223,8 @@ def build_ir_train_transform(args, height, width, normalizer):
     return T.Compose(operations)
 
 def get_train_loader_ir(args, dataset, height, width, batch_size, workers,
-                     num_instances, iters, trainset=None, no_cam=False,train_transformer=None):
+                     num_instances, iters, trainset=None, no_cam=False,
+                     train_transformer=None, resolution_process=None):
 
 
     train_set = sorted(dataset.train) if trainset is None else sorted(trainset)
@@ -233,14 +239,17 @@ def get_train_loader_ir(args, dataset, height, width, batch_size, workers,
     train_loader = IterLoader(
         DataLoader(Preprocessor(
             train_set, root=dataset.images_dir, transform=train_transformer,
-            image_process=get_dynamic_agva_process(args, dataset.images_dir)),
+            image_process=get_dynamic_agva_process(args, dataset.images_dir),
+            resolution_process=resolution_process),
                    batch_size=batch_size, num_workers=workers, sampler=sampler,
                    shuffle=not rmgs_flag, pin_memory=True, drop_last=True), length=iters)
 
     return train_loader
 
 def get_train_loader_color(args, dataset, height, width, batch_size, workers,
-                     num_instances, iters, trainset=None, no_cam=False,train_transformer=None,train_transformer1=None):
+                     num_instances, iters, trainset=None, no_cam=False,
+                     train_transformer=None, train_transformer1=None,
+                     resolution_process=None):
 
 
 
@@ -260,7 +269,10 @@ def get_train_loader_color(args, dataset, height, width, batch_size, workers,
                        shuffle=not rmgs_flag, pin_memory=True, drop_last=True), length=iters)
     else:
         train_loader = IterLoader(
-            DataLoader(Preprocessor_color(train_set, root=dataset.images_dir, transform=train_transformer,transform1=train_transformer1),
+            DataLoader(Preprocessor_color(
+                train_set, root=dataset.images_dir,
+                transform=train_transformer, transform1=train_transformer1,
+                resolution_process1=resolution_process),
                        batch_size=batch_size, num_workers=workers, sampler=sampler,
                        shuffle=not rmgs_flag, pin_memory=True, drop_last=True), length=iters)
 
@@ -575,7 +587,12 @@ def main():
             or args.dump_cluster_dist_epoch >= args.epochs):
         parser.error(
             '--dump-cluster-dist-epoch must be -1 or smaller than --epochs')
+    validate_resolution_augment_args(args)
     args.eps_all = resolve_eps_all(args)
+    args.stage1_log_name = append_resolution_log_suffix(
+        args.stage1_log_name, args)
+    args.stage2_log_name = append_resolution_log_suffix(
+        args.stage2_log_name, args)
     args.stage1_log_name = append_eps_log_suffix(
         args.stage1_log_name, args.eps)
     args.stage2_log_name = append_stage2_eps_log_suffix(
@@ -652,6 +669,10 @@ def main_worker_stage1(args,log_s1_name):
     ir_name, rgb_name = get_training_dataset_names(args.dataset_key)
     dataset_ir = get_data(ir_name, args.data_dir,trial=trial)
     dataset_rgb = get_data(rgb_name, args.data_dir,trial=trial)
+    resolution_augmenters = build_resolution_augmenters(
+        args, dataset_ir.train, dataset_rgb.train, stage=1,
+        aerial_root=dataset_ir.images_dir,
+        ground_root=dataset_rgb.images_dir)
 
 
     test_loader_ir = get_test_loader(dataset_ir, args.height, args.width, args.batch_size, args.workers)
@@ -669,6 +690,7 @@ def main_worker_stage1(args,log_s1_name):
         model, debug_nonfinite=args.debug_nonfinite)
 
     for epoch in range(args.epochs):
+        reset_resolution_stats(resolution_augmenters)
         with torch.no_grad():
             if epoch == 0:
                 # DBSCAN cluster
@@ -885,17 +907,20 @@ def main_worker_stage1(args,log_s1_name):
 
         train_loader_ir = get_train_loader_ir(args, dataset_ir, args.height, args.width,
                                         args.batch_size, args.workers, args.num_instances, iters,
-                                        trainset=pseudo_labeled_dataset_ir, no_cam=args.no_cam,train_transformer=transform_thermal)
+                                        trainset=pseudo_labeled_dataset_ir, no_cam=args.no_cam,train_transformer=transform_thermal,
+                                        resolution_process=resolution_augmenters['aerial'])
 
         train_loader_rgb = get_train_loader_color(args, dataset_rgb, args.height, args.width,
                                         args.batch_size//2, args.workers, args.num_instances, iters,
-                                        trainset=pseudo_labeled_dataset_rgb, no_cam=args.no_cam,train_transformer=train_transformer_rgb,train_transformer1=train_transformer_rgb1)
+                                        trainset=pseudo_labeled_dataset_rgb, no_cam=args.no_cam,train_transformer=train_transformer_rgb,train_transformer1=train_transformer_rgb1,
+                                        resolution_process=resolution_augmenters['ground'])
 
         train_loader_ir.new_epoch()
         train_loader_rgb.new_epoch()
 
         trainer.train(epoch, train_loader_ir,train_loader_rgb, optimizer,
                       print_freq=args.print_freq, train_iters=len(train_loader_ir))
+        print_resolution_stats(1, epoch, resolution_augmenters)
 
         if epoch>=0:
 ##############################
@@ -994,6 +1019,10 @@ def main_worker_stage2(args,log_s1_name,log_s2_name,stage1_checkpoint=None):
     ir_name, rgb_name = get_training_dataset_names(args.dataset_key)
     dataset_ir = get_data(ir_name, args.data_dir,trial=trial)
     dataset_rgb = get_data(rgb_name, args.data_dir,trial=trial)
+    resolution_augmenters = build_resolution_augmenters(
+        args, dataset_ir.train, dataset_rgb.train, stage=2,
+        aerial_root=dataset_ir.images_dir,
+        ground_root=dataset_rgb.images_dir)
 
     test_loader_ir = get_test_loader(dataset_ir, args.height, args.width, args.batch_size, args.workers)
     test_loader_rgb = get_test_loader(dataset_rgb, args.height, args.width, args.batch_size, args.workers)
@@ -1037,6 +1066,7 @@ def main_worker_stage2(args,log_s1_name,log_s2_name,stage1_checkpoint=None):
     print('Stage 2 EMA model update enabled: True')
 
     for epoch in range(args.epochs):
+        reset_resolution_stats(resolution_augmenters)
         with torch.no_grad():
             if epoch == 0:
                 # DBSCAN cluster
@@ -1424,21 +1454,25 @@ def main_worker_stage2(args,log_s1_name,log_s2_name,stage1_checkpoint=None):
 
         train_loader_ir = get_train_loader_ir(args, dataset_ir, args.height, args.width,
                                         args.batch_size, args.workers, args.num_instances, iters,
-                                        trainset=pseudo_labeled_dataset_ir, no_cam=args.no_cam,train_transformer=transform_thermal)
+                                        trainset=pseudo_labeled_dataset_ir, no_cam=args.no_cam,train_transformer=transform_thermal,
+                                        resolution_process=resolution_augmenters['aerial'])
 
         train_loader_rgb = get_train_loader_color(args, dataset_rgb, args.height, args.width,
                                         args.batch_size, args.workers, args.num_instances, iters,
-                                        trainset=pseudo_labeled_dataset_rgb, no_cam=args.no_cam,train_transformer=train_transformer_rgb,train_transformer1=train_transformer_rgb1)
+                                        trainset=pseudo_labeled_dataset_rgb, no_cam=args.no_cam,train_transformer=train_transformer_rgb,train_transformer1=train_transformer_rgb1,
+                                        resolution_process=resolution_augmenters['ground'])
         train_loader_all_ir = get_train_loader_ir(args, dataset_ir, args.height, args.width,
                                                   args.batch_size, args.workers, args.num_instances, iters,
                                                   trainset=pseudo_labeled_dataset_all_ir, no_cam=args.no_cam,
-                                                  train_transformer=transform_thermal)
+                                                  train_transformer=transform_thermal,
+                                                  resolution_process=resolution_augmenters['aerial'])
 
         train_loader_all_rgb = get_train_loader_color(args, dataset_rgb, args.height, args.width,
                                                       args.batch_size, args.workers, args.num_instances, iters,
                                                       trainset=pseudo_labeled_dataset_all_rgb, no_cam=args.no_cam,
                                                       train_transformer=train_transformer_rgb,
-                                                      train_transformer1=train_transformer_rgb1)        
+                                                      train_transformer1=train_transformer_rgb1,
+                                                      resolution_process=resolution_augmenters['ground'])
 
         train_loader_ir.new_epoch()
         train_loader_rgb.new_epoch()
@@ -1448,6 +1482,7 @@ def main_worker_stage2(args,log_s1_name,log_s2_name,stage1_checkpoint=None):
 
         trainer.train(epoch, train_loader_ir, train_loader_rgb, train_loader_all_ir, train_loader_all_rgb, optimizer,
                       print_freq=args.print_freq, train_iters=len(train_loader_ir), i2r=i2r, r2i=r2i)
+        print_resolution_stats(2, epoch, resolution_augmenters)
 
         if epoch>=0:
 ##############################
@@ -1632,5 +1667,6 @@ if __name__ == '__main__':
         default_mask_dir='/home/lab338/Jaxon/dataset/AGreid_train_SCHP/aerial_modify/1/bounding_box_train',
         default_image_root='/home/lab338/Jaxon/dataset/AGreid_train',
     )
+    add_resolution_augment_arguments(parser)
 
     main()

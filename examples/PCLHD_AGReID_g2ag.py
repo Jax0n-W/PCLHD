@@ -23,6 +23,7 @@ Usage:
 """
 from __future__ import print_function, absolute_import
 import argparse
+import csv
 import os.path as osp
 import os
 import sys
@@ -45,6 +46,9 @@ from agreid_identity import (
 from clustercontrast.utils.data import transforms as T
 from clustercontrast.utils.data.preprocessor import Preprocessor
 from clustercontrast.utils.serialization import load_checkpoint
+from clustercontrast.utils.resolution_buckets import (
+    evaluate_resolution_buckets, format_bucket_result,
+    read_query_heights, validate_resolution_buckets)
 
 
 def create_model(args):
@@ -254,7 +258,8 @@ def eval_agreid(distmat, q_pids, g_pids, max_rank=20, q_camids=None, g_camids=No
     return all_cmc, mAP, mINP
 
 
-def evaluate_mode(model, query_entries, gall_entries, transform_test, args, mode_name, img_size=(144, 288)):
+def evaluate_mode(model, query_entries, gall_entries, transform_test, args,
+                  mode_name, img_size=(144, 288), bucket_sink=None):
     """
     Evaluate a single mode.
 
@@ -346,10 +351,34 @@ def evaluate_mode(model, query_entries, gall_entries, transform_test, args, mode
     print('FC:   Rank-1: {:.2%} | Rank-5: {:.2%} | Rank-10: {:.2%} | Rank-20: {:.2%} | mAP: {:.2%} | mINP: {:.2%}'.format(
         cmc[0], cmc[4], cmc[9], cmc[19], mAP, mINP))
 
+    if bucket_sink is not None:
+        bucket_sink.append({
+            "protocol": mode_name, "bucket": "all",
+            "query_height_min": "", "query_height_max": "",
+            "query_images": len(query_entries),
+            "gallery_images": len(gall_entries),
+            "rank1": float(cmc[0]), "mAP": float(mAP),
+            "checkpoint": osp.abspath(osp.expanduser(args.resume)),
+        })
+        bucket_rows = evaluate_resolution_buckets(
+            -distmat, query_pids, gall_pids, query_camids, gall_camids,
+            read_query_heights(query_paths), args.res_buckets, eval_agreid)
+        for row in bucket_rows:
+            print(format_bucket_result(mode_name, row))
+            bucket_sink.append({
+                "protocol": mode_name, "bucket": row["bucket"],
+                "query_height_min": row["query_height_min"],
+                "query_height_max": row["query_height_max"],
+                "query_images": row["query_images"],
+                "gallery_images": len(gall_entries),
+                "rank1": row["rank1"], "mAP": row["mAP"],
+                "checkpoint": osp.abspath(osp.expanduser(args.resume)),
+            })
+
     return cmc, mAP, mINP
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description="PCLHD AG-ReID Test (SeCap Protocol)")
     parser.add_argument('--data-dir', type=str, required=True,
                         help='Path to AGreid_test dataset, '
@@ -369,7 +398,31 @@ def main():
                         help='number of feature dimensions')
     parser.add_argument('--dropout', type=float, default=0,
                         help='dropout ratio')
-    args = parser.parse_args()
+    parser.add_argument(
+        '--res-buckets', type=int, nargs='+', default=None,
+        metavar='HEIGHT',
+        help='query-height thresholds, e.g. --res-buckets 80 150')
+    parser.add_argument('--output-csv', default='')
+    parser.add_argument('--dry-run', action='store_true')
+    args = parser.parse_args(argv)
+    args.res_buckets = validate_resolution_buckets(args.res_buckets)
+
+    if args.dry_run:
+        output_csv = args.output_csv or osp.join(
+            osp.dirname(osp.abspath(osp.expanduser(args.resume))),
+            'agreid_resolution_buckets.csv')
+        print('AG-ReID.v1 evaluation dry run')
+        print('Data directory: {}'.format(
+            osp.abspath(osp.expanduser(args.data_dir))))
+        print('Checkpoint: {}'.format(
+            osp.abspath(osp.expanduser(args.resume))))
+        print('Protocols: A2G, G2A, G2A+G')
+        print('Resolution buckets: {}'.format(
+            'off' if args.res_buckets is None else
+            ' '.join(str(value) for value in args.res_buckets)))
+        print('Output CSV: {}'.format(
+            osp.abspath(osp.expanduser(output_csv))))
+        return 0
 
     cudnn.benchmark = True
 
@@ -431,6 +484,7 @@ def main():
     img_size = (args.width, args.height)
 
     results = {}
+    bucket_rows = [] if args.res_buckets is not None else None
 
     # --- Mode A2G: Aerial query -> Ground gallery ---
     print("\n" + "#" * 60)
@@ -439,7 +493,8 @@ def main():
     print("#   Gallery = bounding_box_test_all_c3 (Ground/RGB, camera 3)")
     print("#" * 60)
     cmc_a2g, mAP_a2g, mINP_a2g = evaluate_mode(
-        model, aerial_query, ground_gallery, transform_test, args, "A2G", img_size)
+        model, aerial_query, ground_gallery, transform_test, args, "A2G",
+        img_size, bucket_sink=bucket_rows)
     results['A2G'] = (cmc_a2g, mAP_a2g, mINP_a2g)
 
     # --- Mode G2A: Ground query -> Aerial gallery ---
@@ -449,7 +504,8 @@ def main():
     print("#   Gallery = bounding_box_test_all_c0 (Aerial/IR, camera 0)")
     print("#" * 60)
     cmc_g2a, mAP_g2a, mINP_g2a = evaluate_mode(
-        model, ground_query, aerial_gallery, transform_test, args, "G2A", img_size)
+        model, ground_query, aerial_gallery, transform_test, args, "G2A",
+        img_size, bucket_sink=bucket_rows)
     results['G2A'] = (cmc_g2a, mAP_g2a, mINP_g2a)
 
     # --- Mode G2A+G: Ground query -> Aerial + Ground gallery ---
@@ -461,7 +517,8 @@ def main():
     # Combine aerial and ground galleries
     combined_gallery = aerial_gallery + ground_gallery
     cmc_g2ag, mAP_g2ag, mINP_g2ag = evaluate_mode(
-        model, ground_query, combined_gallery, transform_test, args, "G->A+G", img_size)
+        model, ground_query, combined_gallery, transform_test, args,
+        "G->A+G", img_size, bucket_sink=bucket_rows)
     results['G2A+G'] = (cmc_g2ag, mAP_g2ag, mINP_g2ag)
 
     # ========================================================
@@ -482,6 +539,22 @@ def main():
             print("{:<10} {:<8} {:<8} {:<9} {:<9} {:<8} {:<8}".format(
                 mode_name, "N/A", "N/A", "N/A", "N/A", "N/A", "N/A"))
     print("-" * 70)
+    if bucket_rows is not None:
+        output_csv = args.output_csv or osp.join(
+            osp.dirname(osp.abspath(osp.expanduser(args.resume))),
+            'agreid_resolution_buckets.csv')
+        output_csv = osp.abspath(osp.expanduser(output_csv))
+        output_dir = osp.dirname(output_csv)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+        fieldnames = [
+            'protocol', 'bucket', 'query_height_min', 'query_height_max',
+            'query_images', 'gallery_images', 'rank1', 'mAP', 'checkpoint']
+        with open(output_csv, 'w', encoding='utf-8', newline='') as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(bucket_rows)
+        print('Resolution bucket CSV: {}'.format(output_csv))
     print("Log saved to: {}".format(log_path))
 
 

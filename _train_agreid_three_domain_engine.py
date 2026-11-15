@@ -39,6 +39,11 @@ from clustercontrast.three_domain import (
 from clustercontrast.trainers_three_domain import \
     ClusterContrastTrainer_PCLMP_ThreeDomain
 from clustercontrast.utils.data import transforms as T
+from clustercontrast.utils.data.resolution_augment import (
+    add_resolution_augment_arguments, append_resolution_log_suffix,
+    build_resolution_augmenters, print_resolution_stats,
+    reset_resolution_stats, validate_resolution_augment_args,
+)
 from clustercontrast.utils.clustering import \
     append_stage2_eps_log_suffix, build_agreid_three_domain_clusterers, \
     resolve_eps_all
@@ -421,6 +426,10 @@ def main_worker_stage2(args):
         ir_name, args.data_dir, trial=args.trial)
     dataset_ground = baseline.get_data(
         rgb_name, args.data_dir, trial=args.trial)
+    resolution_augmenters = build_resolution_augmenters(
+        args, dataset_ir.train, dataset_ground.train, stage=2,
+        aerial_root=dataset_ir.images_dir,
+        ground_root=dataset_ground.images_dir)
     if args.stage2_aerial_root:
         original_count = len(dataset_ir.train)
         dataset_ir.train = remap_samples_to_enhanced_root(
@@ -486,6 +495,7 @@ def main_worker_stage2(args):
     iters = args.iters if args.iters > 0 else None
 
     for epoch in range(args.epochs):
+        reset_resolution_stats(resolution_augmenters)
         with torch.no_grad():
             print("==> Extract Ground features")
             features_ground_ema = _extract_ordered_features(
@@ -641,34 +651,40 @@ def main_worker_stage2(args):
             args, dataset_ir, args.height, args.width, far_batch_size,
             args.workers, args.num_instances, iters,
             trainset=pseudo_far, no_cam=args.no_cam,
-            train_transformer=aerial_transform)
+            train_transformer=aerial_transform,
+            resolution_process=resolution_augmenters["aerial"])
         loader_near = baseline.get_train_loader_ir(
             args, dataset_ir, args.height, args.width, near_batch_size,
             args.workers, args.num_instances, iters,
             trainset=pseudo_near, no_cam=args.no_cam,
-            train_transformer=aerial_transform)
+            train_transformer=aerial_transform,
+            resolution_process=resolution_augmenters["aerial"])
         loader_ground = baseline.get_train_loader_color(
             args, dataset_ground, args.height, args.width, args.batch_size,
             args.workers, args.num_instances, iters,
             trainset=pseudo_ground, no_cam=args.no_cam,
             train_transformer=ground_transform,
-            train_transformer1=ground_aug_transform)
+            train_transformer1=ground_aug_transform,
+            resolution_process=resolution_augmenters["ground"])
         loader_all_far = baseline.get_train_loader_ir(
             args, dataset_ir, args.height, args.width, far_batch_size,
             args.workers, args.num_instances, iters,
             trainset=joint_far, no_cam=args.no_cam,
-            train_transformer=aerial_transform)
+            train_transformer=aerial_transform,
+            resolution_process=resolution_augmenters["aerial"])
         loader_all_near = baseline.get_train_loader_ir(
             args, dataset_ir, args.height, args.width, near_batch_size,
             args.workers, args.num_instances, iters,
             trainset=joint_near, no_cam=args.no_cam,
-            train_transformer=aerial_transform)
+            train_transformer=aerial_transform,
+            resolution_process=resolution_augmenters["aerial"])
         loader_all_ground = baseline.get_train_loader_color(
             args, dataset_ground, args.height, args.width, args.batch_size,
             args.workers, args.num_instances, iters,
             trainset=joint_ground, no_cam=args.no_cam,
             train_transformer=ground_transform,
-            train_transformer1=ground_aug_transform)
+            train_transformer1=ground_aug_transform,
+            resolution_process=resolution_augmenters["ground"])
         loaders = (loader_far, loader_near, loader_ground,
                    loader_all_far, loader_all_near, loader_all_ground)
         for loader in loaders:
@@ -680,6 +696,7 @@ def main_worker_stage2(args):
             far_to_near=far_to_near, near_to_far=near_to_far,
             near_to_ground=near_to_ground,
             ground_to_near=ground_to_near)
+        print_resolution_stats(2, epoch, resolution_augmenters)
         best_r1, best_map, best_epoch = _evaluate(
             model_ema, args, data_dir, epoch,
             best_r1, best_map, best_epoch)
@@ -792,13 +809,17 @@ def build_parser():
         agva_near_probability=None,
         agva_selection_mode='global',
         stage2_aerial_root='')
+    add_resolution_augment_arguments(parser)
     return parser
 
 
 def main(argv=None):
     args = build_parser().parse_args(
         sys.argv[1:] if argv is None else argv)
+    validate_resolution_augment_args(args)
     args.eps_all = resolve_eps_all(args)
+    args.stage2_log_name = append_resolution_log_suffix(
+        args.stage2_log_name, args)
     args.stage2_log_name = append_stage2_eps_log_suffix(
         args.stage2_log_name, args.eps, args.eps_all)
     _validate_args(args)

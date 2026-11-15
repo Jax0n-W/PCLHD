@@ -24,6 +24,9 @@ from agreid_identity import (  # noqa: E402
     validate_agreidv2_protocol)
 from clustercontrast.utils.data import transforms as T  # noqa: E402
 from clustercontrast.utils.serialization import load_checkpoint  # noqa: E402
+from clustercontrast.utils.resolution_buckets import (  # noqa: E402
+    evaluate_resolution_buckets, format_bucket_result,
+    read_query_heights, validate_resolution_buckets)
 from examples.PCLHD_AGReID_g2ag import (  # noqa: E402
     TestData, create_model, eval_agreid, extract_feat_modal)
 
@@ -85,7 +88,8 @@ def extract_entries_features(model, entries, transform, args):
     return features
 
 
-def evaluate_protocol(model, data_dir, protocol_key, transform, args):
+def evaluate_protocol(model, data_dir, protocol_key, transform, args,
+                      bucket_sink=None):
     spec = DATASET_SPECS["agreidv2"]["protocols"][protocol_key]
     query, gallery = parse_agreidv2_manifest(
         data_dir, protocol_key, validate=True)
@@ -112,7 +116,7 @@ def evaluate_protocol(model, data_dir, protocol_key, transform, args):
         "{}: Rank-1={:.2%} Rank-5={:.2%} Rank-10={:.2%} "
         "mAP={:.2%} mINP={:.2%}".format(
             protocol_key, cmc[0], cmc[4], cmc[9], mean_ap, minp))
-    return {
+    result = {
         "protocol": protocol_key,
         "direction": spec["name"],
         "manifest": spec["manifest"],
@@ -127,6 +131,25 @@ def evaluate_protocol(model, data_dir, protocol_key, transform, args):
         "checkpoint": osp.abspath(osp.expanduser(args.resume)),
         "seed": args.seed,
     }
+    if bucket_sink is not None:
+        bucket_sink.append(dict(result, bucket="all",
+                                query_height_min="",
+                                query_height_max=""))
+        bucket_rows = evaluate_resolution_buckets(
+            -similarities, query_pids, gallery_pids,
+            query_camids, gallery_camids,
+            read_query_heights([entry.path for entry in query]),
+            args.res_buckets, eval_agreid)
+        for row in bucket_rows:
+            print(format_bucket_result(protocol_key, row))
+            bucket_sink.append(dict(
+                result, bucket=row["bucket"],
+                query_height_min=row["query_height_min"],
+                query_height_max=row["query_height_max"],
+                query_images=row["query_images"], rank1=row["rank1"],
+                rank5=row["rank5"], rank10=row["rank10"],
+                mAP=row["mAP"], mINP=row["mINP"]))
+    return result
 
 
 def build_parser():
@@ -136,6 +159,11 @@ def build_parser():
                         help="Outer directory containing manifests and AG-ReID.v2/")
     parser.add_argument("--resume", required=True)
     parser.add_argument("--output-csv", default="")
+    parser.add_argument(
+        "--res-buckets", type=int, nargs="+", default=None,
+        metavar="HEIGHT",
+        help="query-height thresholds, e.g. --res-buckets 80 150")
+    parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--arch", default="agw")
     parser.add_argument("--height", type=int, default=288)
@@ -153,6 +181,22 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     args.data_dir = osp.abspath(osp.expanduser(args.data_dir))
     args.resume = osp.abspath(osp.expanduser(args.resume))
+    args.res_buckets = validate_resolution_buckets(args.res_buckets)
+    if args.dry_run:
+        output_csv = args.output_csv or osp.join(
+            osp.dirname(args.resume),
+            "agreidv2_results_seed{}.csv".format(args.seed))
+        print("AG-ReID.v2 evaluation dry run")
+        print("Data directory: {}".format(args.data_dir))
+        print("Checkpoint: {}".format(args.resume))
+        print("Protocols: {}".format(
+            ", ".join(DATASET_SPECS["agreidv2"]["protocols"])))
+        print("Resolution buckets: {}".format(
+            "off" if args.res_buckets is None else
+            " ".join(str(value) for value in args.res_buckets)))
+        print("Output CSV: {}".format(
+            osp.abspath(osp.expanduser(output_csv))))
+        return 0
     if not osp.isfile(args.resume):
         raise FileNotFoundError(args.resume)
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
@@ -175,9 +219,11 @@ def main(argv=None):
         T.ToTensor(), normalize])
 
     rows = []
+    bucket_rows = [] if args.res_buckets is not None else None
     for protocol_key in DATASET_SPECS["agreidv2"]["protocols"]:
         rows.append(evaluate_protocol(
-            model, args.data_dir, protocol_key, transform, args))
+            model, args.data_dir, protocol_key, transform, args,
+            bucket_sink=bucket_rows))
 
     output_csv = args.output_csv or osp.join(
         osp.dirname(args.resume),
@@ -190,10 +236,18 @@ def main(argv=None):
         "protocol", "direction", "manifest", "query_images",
         "gallery_images", "identities", "rank1", "rank5", "rank10",
         "mAP", "mINP", "checkpoint", "seed"]
+    rows_to_write = rows
+    if bucket_rows is not None:
+        fieldnames = [
+            "protocol", "direction", "manifest", "bucket",
+            "query_height_min", "query_height_max", "query_images",
+            "gallery_images", "identities", "rank1", "rank5", "rank10",
+            "mAP", "mINP", "checkpoint", "seed"]
+        rows_to_write = bucket_rows
     with open(output_csv, "w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(rows_to_write)
     print("\nAG-ReID.v2 results CSV: {}".format(output_csv))
     return 0
 

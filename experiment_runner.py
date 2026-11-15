@@ -12,6 +12,10 @@ import shlex
 import subprocess
 import sys
 
+from clustercontrast.utils.data.resolution_augment import (
+    add_resolution_augment_arguments, append_resolution_log_suffix,
+    resolution_log_suffix, validate_resolution_augment_args)
+
 
 PROJECT_ROOT = osp.dirname(osp.abspath(__file__))
 DEFAULT_EPS = 0.3
@@ -128,6 +132,7 @@ def build_parser():
         "--no-debug-nonfinite", action="store_false",
         dest="debug_nonfinite")
     parser.add_argument("--allow-log-overwrite", action="store_true")
+    add_resolution_augment_arguments(parser)
     parser.add_argument(
         "--dry-run", action="store_true",
         help="Validate configuration and print commands without executing")
@@ -193,6 +198,8 @@ def default_log_names(args, spec=None):
     stage2 = args.stage2_log_name or (
         "{}_{}_d{}_t{}_channel_off_s2_seed{}".format(
             prefix, args.experiment, d_flag, t_flag, args.seed))
+    stage1 = append_resolution_log_suffix(stage1, args)
+    stage2 = append_resolution_log_suffix(stage2, args)
     stage1 = _append_eps_suffix(stage1, args.eps)
     stage2 = _append_stage2_eps_suffix(
         stage2, args.eps, resolve_eps_all(args))
@@ -260,6 +267,22 @@ def _dynamic_args(args):
     return result
 
 
+def _resolution_args(args):
+    if args.res_aug_mode == "off":
+        return []
+    return [
+        "--res-aug-mode", args.res_aug_mode,
+        "--res-aug-prob", str(args.res_aug_prob),
+        "--res-aug-domains", args.res_aug_domains,
+        "--res-aug-stages", str(args.res_aug_stages),
+        "--res-aug-min-scale", str(args.res_aug_min_scale),
+        "--res-aug-patches",
+        str(args.res_aug_patches[0]), str(args.res_aug_patches[1]),
+        "--res-aug-patch-area",
+        str(args.res_aug_patch_area[0]), str(args.res_aug_patch_area[1]),
+    ]
+
+
 def build_stage1_command(args, stage1_log_name=None, stage2_log_name=None):
     spec = get_experiment_spec(args.experiment)
     default_s1, default_s2 = default_log_names(args, spec)
@@ -268,6 +291,7 @@ def build_stage1_command(args, stage1_log_name=None, stage2_log_name=None):
     command = [sys.executable, osp.join(PROJECT_ROOT, "_train_agreid_engine.py")]
     command += _base_common_args(args, stage1_log_name, stage2_log_name)
     command += ["--stage1-only"]
+    command += _resolution_args(args)
     if spec["dynamic_agva"]:
         command += _dynamic_args(args)
     return command
@@ -288,6 +312,7 @@ def build_stage2_command(args, checkpoint, stage1_log_name=None,
             "--stage2-only", "--stage1-checkpoint", checkpoint,
             "--stage2-memorybank", "CMhard", "--no-ema-loss",
         ]
+        command += _resolution_args(args)
         if args.eps_all is not None:
             command += ["--eps-all", str(args.eps_all)]
         if args.dump_cluster_dist_epoch >= 0:
@@ -346,6 +371,7 @@ def build_stage2_command(args, checkpoint, stage1_log_name=None,
     if args.dump_cluster_dist_epoch >= 0:
         command += [
             "--dump-cluster-dist-epoch", str(args.dump_cluster_dist_epoch)]
+    command += _resolution_args(args)
     return command
 
 
@@ -359,6 +385,7 @@ def checkpoint_path(args, stage1_log_name):
 
 def validate_args(args):
     spec = get_experiment_spec(args.experiment)
+    validate_resolution_augment_args(args)
     if args.dataset_key == "agreidv2" and args.experiment != "baseline":
         raise ValueError(
             "AG-ReID.v2 currently supports baseline only; D-AGVA masks and "
@@ -431,6 +458,16 @@ def _print_config(args, spec, stage1_log_name, stage2_log_name):
     print("Stage 2 EMA loss included: False")
     print("Stage 2 EMA encoder update enabled: True")
     print("Stage 2 ALL-memory optimization enabled: True")
+    if args.res_aug_mode != "off":
+        print("Resolution augmentation: mode={} p={} domains={} stages={} "
+              "min_scale={} patches={}..{} patch_area={}..{}".format(
+                  args.res_aug_mode, args.res_aug_prob,
+                  args.res_aug_domains, args.res_aug_stages,
+                  args.res_aug_min_scale, args.res_aug_patches[0],
+                  args.res_aug_patches[1], args.res_aug_patch_area[0],
+                  args.res_aug_patch_area[1]))
+        print("Resolution log suffix: {}".format(
+            resolution_log_suffix(args)))
     print("Checkpoint policy: {}".format(args.checkpoint_policy))
     print("Stage 1 log: {}".format(stage1_log_name))
     print("Stage 2 log: {}".format(stage2_log_name))
