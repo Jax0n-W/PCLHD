@@ -1,12 +1,16 @@
 # -*- coding: utf-8 -*-
 """Controlled AG-ReID experiment launcher.
 
-AG-ReID.v1 exposes the original 2x2 matrix. AG-ReID.v2 currently exposes only
-the channel-off baseline.
+Both AG-ReID.v1 and AG-ReID.v2 expose the 2x2 matrix
+(D-AGVA in Stage 1) x (three-domain matching in Stage 2), channel
+augmentation fixed off.  v1 keeps its historical default paths; v2 derives
+its SCHP mask directory, image root and view-score file from ``--data-dir``
+unless they are given explicitly.
 """
 from __future__ import absolute_import, print_function
 
 import argparse
+import os
 import os.path as osp
 import shlex
 import subprocess
@@ -38,6 +42,10 @@ DEFAULT_IMAGE_ROOT = (
 )
 DEFAULT_VIEW_SCORE = osp.join(
     PROJECT_ROOT, "view_scores", "agreid_aerial_view_scores_foreground.csv"
+)
+DEFAULT_V2_VIEW_SCORE = osp.join(
+    PROJECT_ROOT, "view_domain", "outputs", "agreidv2",
+    "agreidv2_aerial_view_scores_foreground.csv"
 )
 
 
@@ -101,8 +109,14 @@ def build_parser():
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--print-freq", type=int, default=50)
 
-    parser.add_argument("--dynamic-agva-mask-dir", default=DEFAULT_MASK_DIR)
-    parser.add_argument("--dynamic-agva-image-root", default=DEFAULT_IMAGE_ROOT)
+    parser.add_argument(
+        "--dynamic-agva-mask-dir", default="",
+        help=("SCHP mask root. Default: v1 historical path; v2 "
+              "<data-dir>_SCHP/train_all"))
+    parser.add_argument(
+        "--dynamic-agva-image-root", default="",
+        help=("Image root mirrored by the mask root. Default: v1 historical "
+              "path; v2 <data-dir>/AG-ReID.v2/train_all"))
     parser.add_argument(
         "--dynamic-agva-slots", type=int, choices=(1, 2), default=1)
     parser.add_argument(
@@ -111,7 +125,11 @@ def build_parser():
         "--dynamic-agva-max-displacement", type=float, default=0.040)
     parser.add_argument("--dynamic-agva-strict-masks", action="store_true")
 
-    parser.add_argument("--view-score-file", default=DEFAULT_VIEW_SCORE)
+    parser.add_argument(
+        "--view-score-file", default="",
+        help=("Aerial OOF view-score CSV. Default: v1 bundled CSV; v2 "
+              "view_domain/outputs/agreidv2/"
+              "agreidv2_aerial_view_scores_foreground.csv"))
     parser.add_argument(
         "--view-score-column", default="p_ground_foreground")
     parser.add_argument(
@@ -137,6 +155,36 @@ def build_parser():
         "--dry-run", action="store_true",
         help="Validate configuration and print commands without executing")
     return parser
+
+
+def dataset_default_paths(dataset_key, data_dir):
+    """Return the default D-AGVA and view-score paths for one dataset."""
+    if dataset_key == "agreid":
+        return {
+            "mask_dir": DEFAULT_MASK_DIR,
+            "image_root": DEFAULT_IMAGE_ROOT,
+            "view_score": DEFAULT_VIEW_SCORE,
+        }
+    if dataset_key == "agreidv2":
+        outer_root = _path(data_dir).rstrip(os.sep)
+        return {
+            "mask_dir": osp.join(outer_root + "_SCHP", "train_all"),
+            "image_root": osp.join(outer_root, "AG-ReID.v2", "train_all"),
+            "view_score": DEFAULT_V2_VIEW_SCORE,
+        }
+    raise ValueError("Unknown dataset key: {}".format(dataset_key))
+
+
+def resolve_dataset_paths(args):
+    """Fill empty path arguments with dataset defaults (idempotent)."""
+    defaults = dataset_default_paths(args.dataset_key, args.data_dir)
+    if not args.dynamic_agva_mask_dir:
+        args.dynamic_agva_mask_dir = defaults["mask_dir"]
+    if not args.dynamic_agva_image_root:
+        args.dynamic_agva_image_root = defaults["image_root"]
+    if not args.view_score_file:
+        args.view_score_file = defaults["view_score"]
+    return args
 
 
 def get_experiment_spec(name):
@@ -284,6 +332,7 @@ def _resolution_args(args):
 
 
 def build_stage1_command(args, stage1_log_name=None, stage2_log_name=None):
+    resolve_dataset_paths(args)
     spec = get_experiment_spec(args.experiment)
     default_s1, default_s2 = default_log_names(args, spec)
     stage1_log_name = stage1_log_name or default_s1
@@ -299,6 +348,7 @@ def build_stage1_command(args, stage1_log_name=None, stage2_log_name=None):
 
 def build_stage2_command(args, checkpoint, stage1_log_name=None,
                          stage2_log_name=None):
+    resolve_dataset_paths(args)
     spec = get_experiment_spec(args.experiment)
     default_s1, default_s2 = default_log_names(args, spec)
     stage1_log_name = stage1_log_name or default_s1
@@ -327,7 +377,8 @@ def build_stage2_command(args, checkpoint, stage1_log_name=None,
         "--stage2-only",
         "--stage1-checkpoint", checkpoint,
         "--stage2-log-name", stage2_log_name,
-        "--dataset", "agreid_ir",
+        "--dataset",
+        "agreidv2_ir" if args.dataset_key == "agreidv2" else "agreid_ir",
         "--trial", str(args.trial),
         "--epochs", str(args.epochs),
         "--iters", str(args.iters),
@@ -362,6 +413,8 @@ def build_stage2_command(args, checkpoint, stage1_log_name=None,
         "--cluster-n-jobs", str(args.cluster_n_jobs),
         "--channel-adap-gray", "off",
     ]
+    if args.dataset_key != "agreid":
+        command += ["--dataset-key", args.dataset_key]
     if args.allow_log_overwrite:
         command.append("--allow-log-overwrite")
     if args.eps_all is not None:
@@ -384,12 +437,9 @@ def checkpoint_path(args, stage1_log_name):
 
 
 def validate_args(args):
+    resolve_dataset_paths(args)
     spec = get_experiment_spec(args.experiment)
     validate_resolution_augment_args(args)
-    if args.dataset_key == "agreidv2" and args.experiment != "baseline":
-        raise ValueError(
-            "AG-ReID.v2 currently supports baseline only; D-AGVA masks and "
-            "three-domain view scores for v2 are not prepared")
     if args.run_mode == "stage2" and not args.stage1_checkpoint:
         raise ValueError("--run-mode stage2 requires --stage1-checkpoint")
     if args.run_mode != "stage2" and args.stage1_checkpoint:
@@ -445,7 +495,7 @@ def _print_config(args, spec, stage1_log_name, stage2_log_name):
     if args.dataset_key == "agreid":
         print("========== AG-ReID.v1 Controlled Ablation ==========")
     else:
-        print("========== AG-ReID.v2 Baseline ==========")
+        print("========== AG-ReID.v2 Controlled Ablation ==========")
     print("Experiment: {}".format(args.experiment))
     print("Run mode: {}".format(args.run_mode))
     print("D-AGVA (Stage 1 only): {}".format(spec["dynamic_agva"]))
@@ -468,6 +518,13 @@ def _print_config(args, spec, stage1_log_name, stage2_log_name):
                   args.res_aug_patch_area[1]))
         print("Resolution log suffix: {}".format(
             resolution_log_suffix(args)))
+    if spec["dynamic_agva"]:
+        print("D-AGVA mask dir: {}".format(_path(args.dynamic_agva_mask_dir)))
+        print("D-AGVA image root: {}".format(
+            _path(args.dynamic_agva_image_root)))
+    if spec["three_domain"]:
+        print("View score file: {}".format(_path(args.view_score_file)))
+        print("View near ratio (per camera): {}".format(args.view_near_ratio))
     print("Checkpoint policy: {}".format(args.checkpoint_policy))
     print("Stage 1 log: {}".format(stage1_log_name))
     print("Stage 2 log: {}".format(stage2_log_name))

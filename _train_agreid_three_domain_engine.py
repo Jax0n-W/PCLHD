@@ -11,6 +11,7 @@ are retained.
 from __future__ import absolute_import, print_function
 
 import argparse
+import os
 import os.path as osp
 import random
 import sys
@@ -132,10 +133,6 @@ def _resolve_sub_batch_sizes(args):
 
 
 def _validate_args(args):
-    if args.dataset_key == "agreidv2":
-        raise ValueError(
-            "AG-ReID.v2 currently supports baseline only; its D-AGVA masks "
-            "and three-domain view scores are not prepared")
     if args.channel_adap_gray != "off":
         raise ValueError("Channel augmentation is fixed off in this release")
     if not 0.0 < args.view_near_ratio < 1.0:
@@ -225,6 +222,9 @@ def _prepare_view_groups(args, dataset_ir):
     print("Per-camera near ratio: {:.6f}".format(args.view_near_ratio))
     print("CSV rows: {}".format(csv_stats["csv_rows"]))
     print("Matched aerial images: {}".format(match_stats["matched"]))
+    for camera, item in sorted(csv_stats["camera_stats"].items()):
+        print("  camera {}: images={} near={}".format(
+            camera, item["count"], item["near_count"]))
     print("A_far images: {}".format(len(far_train)))
     print("A_near images: {}".format(len(near_train)))
     print("=============================================")
@@ -540,9 +540,16 @@ def main_worker_stage2(args):
             all_train = ground_train + aerial_train
             features_all = torch.cat(
                 (features_ground, features_aerial), dim=0)
+            # v2 paths carry no aerial_modify/ground_modify marker, so the
+            # modality of every row must be passed explicitly (as in the
+            # baseline engine); v1 keeps its historical path-based inference.
+            all_modalities = None
+            if args.dataset_key == "agreidv2":
+                all_modalities = ([1] * len(ground_train)
+                                  + [2] * len(aerial_train))
             distance_all = baseline.compute_modal_invariant_jaccard_distance(
                 features_all, k1=40, k2=32, file=all_train,
-                search_option=3)
+                search_option=3, modalities=all_modalities)
             dump_cluster_distance_if_requested(
                 distance_all, epoch, args.dump_cluster_dist_epoch,
                 args.logs_dir)

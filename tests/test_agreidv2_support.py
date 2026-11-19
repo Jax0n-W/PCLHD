@@ -92,13 +92,89 @@ class AGReIDV2SupportTests(unittest.TestCase):
         self.assertTrue(v1_s1.startswith("agreid_dt_"))
         self.assertTrue(v2_s1.startswith("agreidv2_dt_"))
 
-    def test_v2_rejects_nonbaseline_experiments(self):
-        for experiment in ("dynamic", "three_domain", "full"):
+    def test_v2_accepts_all_experiments_in_dry_run(self):
+        for experiment in ("baseline", "dynamic", "three_domain", "full"):
             args = parse(
-                "--dataset-key", "agreidv2", "--experiment", experiment)
-            with self.assertRaisesRegex(
-                    ValueError, "masks and three-domain view scores"):
-                runner.validate_args(args)
+                "--dataset-key", "agreidv2", "--experiment", experiment,
+                "--data-dir", "/data/AG-ReID.v2")
+            runner.validate_args(args)
+
+    def test_v2_default_paths_follow_data_dir(self):
+        args = parse("--dataset-key", "agreidv2", "--experiment", "full",
+                     "--data-dir", "/data/AG-ReID.v2/")
+        runner.resolve_dataset_paths(args)
+        self.assertEqual(args.dynamic_agva_mask_dir,
+                         osp.join("/data/AG-ReID.v2_SCHP", "train_all"))
+        self.assertEqual(args.dynamic_agva_image_root,
+                         osp.join("/data/AG-ReID.v2", "AG-ReID.v2",
+                                  "train_all"))
+        self.assertEqual(args.view_score_file, runner.DEFAULT_V2_VIEW_SCORE)
+
+    def test_v1_default_paths_are_unchanged(self):
+        args = parse("--experiment", "full")
+        runner.resolve_dataset_paths(args)
+        self.assertEqual(args.dynamic_agva_mask_dir, runner.DEFAULT_MASK_DIR)
+        self.assertEqual(args.dynamic_agva_image_root,
+                         runner.DEFAULT_IMAGE_ROOT)
+        self.assertEqual(args.view_score_file, runner.DEFAULT_VIEW_SCORE)
+
+    def test_explicit_paths_override_v2_defaults(self):
+        args = parse("--dataset-key", "agreidv2", "--experiment", "full",
+                     "--dynamic-agva-mask-dir", "/m",
+                     "--dynamic-agva-image-root", "/i",
+                     "--view-score-file", "/v.csv")
+        runner.resolve_dataset_paths(args)
+        self.assertEqual(args.dynamic_agva_mask_dir, "/m")
+        self.assertEqual(args.dynamic_agva_image_root, "/i")
+        self.assertEqual(args.view_score_file, "/v.csv")
+
+    def test_v2_dynamic_stage1_command(self):
+        args = parse("--dataset-key", "agreidv2", "--experiment", "dynamic",
+                     "--data-dir", "/data/AG-ReID.v2", "--eps", "0.6")
+        stage1_name, stage2_name = runner.default_log_names(args)
+        self.assertEqual(stage1_name,
+                         "agreidv2_dt_s1_d1_channel_off_seed1_eps0.6")
+        self.assertEqual(
+            stage2_name,
+            "agreidv2_dt_dynamic_d1_t0_channel_off_s2_seed1_eps0.6")
+        command = runner.build_stage1_command(args)
+        self.assertIn("--use-dynamic-agva", command)
+        self.assertEqual(
+            command[command.index("--dynamic-agva-image-root") + 1],
+            osp.join("/data/AG-ReID.v2", "AG-ReID.v2", "train_all"))
+        self.assertEqual(command[command.index("--dataset") + 1],
+                         "agreidv2_ir")
+        self.assertEqual(command[command.index("--dataset-key") + 1],
+                         "agreidv2")
+
+    def test_v2_three_domain_stage2_command(self):
+        args = parse("--dataset-key", "agreidv2",
+                     "--experiment", "three_domain",
+                     "--data-dir", "/data/AG-ReID.v2", "--eps", "0.6",
+                     "--dbscan-backend", "fast")
+        _, stage2_name = runner.default_log_names(args)
+        self.assertEqual(
+            stage2_name,
+            "agreidv2_dt_three_domain_d0_t1_channel_off_s2_seed1_eps0.6")
+        command = runner.build_stage2_command(args, "/tmp/s1.pth.tar")
+        self.assertTrue(
+            command[1].endswith("_train_agreid_three_domain_engine.py"))
+        self.assertEqual(command[command.index("--dataset") + 1],
+                         "agreidv2_ir")
+        self.assertEqual(command[command.index("--dataset-key") + 1],
+                         "agreidv2")
+        self.assertEqual(command[command.index("--view-score-file") + 1],
+                         runner.DEFAULT_V2_VIEW_SCORE)
+        self.assertEqual(command[command.index("--dbscan-backend") + 1],
+                         "fast")
+        self.assertNotIn("--use-dynamic-agva", command)
+
+    def test_v1_three_domain_command_has_no_dataset_key(self):
+        args = parse("--experiment", "three_domain")
+        command = runner.build_stage2_command(args, "/tmp/s1.pth.tar")
+        self.assertEqual(command[command.index("--dataset") + 1],
+                         "agreid_ir")
+        self.assertNotIn("--dataset-key", command)
 
 
 if __name__ == "__main__":

@@ -18,7 +18,8 @@ ENTRY = osp.join(ROOT, "train_agreid.py")
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from experiment_runner import DEFAULT_EPS, eps_log_suffix
+from experiment_runner import (
+    DEFAULT_EPS, dataset_default_paths, eps_log_suffix)
 
 ALL_EXPERIMENTS = ("baseline", "dynamic", "three_domain", "full")
 DYNAMIC_EXPERIMENTS = {"dynamic", "full"}
@@ -26,7 +27,7 @@ DYNAMIC_EXPERIMENTS = {"dynamic", "full"}
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        description="Run channel-off AG-ReID.v1 D/T ablations")
+        description="Run channel-off AG-ReID.v1/v2 D/T ablations")
     parser.add_argument("--gpu", default="0")
     parser.add_argument(
         "--dataset-key", choices=("agreid", "agreidv2"),
@@ -39,17 +40,14 @@ def build_parser():
     parser.add_argument(
         "--logs-dir", default=osp.join(ROOT, "logs_agreid_dt"))
     parser.add_argument(
-        "--mask-dir", default=(
-            "/home/lab338/Jaxon/dataset/AGreid_train_SCHP/"
-            "aerial_modify/1/bounding_box_train"))
+        "--mask-dir", default="",
+        help="default: v1 historical path; v2 <data-dir>_SCHP/train_all")
     parser.add_argument(
-        "--aerial-image-root", default=(
-            "/home/lab338/Jaxon/dataset/AGreid_train/"
-            "aerial_modify/1/bounding_box_train"))
+        "--aerial-image-root", default="",
+        help="default: v1 historical path; v2 <data-dir>/AG-ReID.v2/train_all")
     parser.add_argument(
-        "--view-score-file",
-        default=osp.join(
-            ROOT, "view_scores", "agreid_aerial_view_scores_foreground.csv"))
+        "--view-score-file", default="",
+        help="default: v1 bundled CSV; v2 view_domain/outputs/agreidv2/...")
     parser.add_argument("--trial", type=int, default=1)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--epochs", type=int, default=50)
@@ -73,7 +71,16 @@ def build_parser():
     return parser
 
 
+def resolve_paths(args):
+    defaults = dataset_default_paths(args.dataset_key, args.data_dir)
+    args.mask_dir = args.mask_dir or defaults["mask_dir"]
+    args.aerial_image_root = args.aerial_image_root or defaults["image_root"]
+    args.view_score_file = args.view_score_file or defaults["view_score"]
+    return args
+
+
 def common_args(args):
+    resolve_paths(args)
     result = [
         "--data-dir", osp.abspath(osp.expanduser(args.data_dir)),
         "--logs-dir", osp.abspath(osp.expanduser(args.logs_dir)),
@@ -122,11 +129,6 @@ def stage1_checkpoint(args, dynamic):
 def main(argv=None):
     args = build_parser().parse_args(argv)
     selected = list(dict.fromkeys(args.experiments))
-    if (args.dataset_key == "agreidv2"
-            and any(name != "baseline" for name in selected)):
-        raise ValueError(
-            "AG-ReID.v2 currently supports baseline only; D-AGVA masks and "
-            "three-domain view scores for v2 are not prepared")
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
     env.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")

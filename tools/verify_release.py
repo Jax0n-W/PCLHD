@@ -31,6 +31,10 @@ REQUIRED = (
     "tests/test_clustering_eps.py",
     "tests/test_fast_dbscan.py",
     "tools/verify_fast_dbscan.py",
+    "V2_MODULES.md",
+    "scripts/prepare_agreidv2_view_scores.sh",
+    "tests/test_view_domain_v2.py",
+    "tests/test_dynamic_agva_coverage.py",
     "view_scores/agreid_aerial_view_scores_foreground.csv",
 )
 FORBIDDEN_SUFFIXES = (

@@ -242,10 +242,10 @@ checkpoint、日志和 Python cache。
 
 ## AG-ReID.v2 baseline
 
-AG-ReID.v2 目前只开放 `baseline`（D=0、T=0）的 Stage 1、Stage 2 和四个
-官方测试协议。v1 的 2×2 消融入口、默认值和日志名保持不变。v2 的
-`dynamic`、`three_domain`、`full` 会明确报错，因为尚未准备 v2 的 D-AGVA
-掩码与三域视角分数。
+AG-ReID.v2 开放完整的 2×2 消融（baseline / dynamic / three_domain / full）
+和四个官方测试协议。v1 的入口、默认值和日志名保持不变。v2 的 D-AGVA 需要
+SCHP 掩码，三域匹配需要远近分数，准备步骤与命令见
+[`V2_MODULES.md`](V2_MODULES.md)。本节以下内容描述 baseline。
 
 ### 目录要求
 
@@ -295,7 +295,7 @@ python train_agreid.py \
 ```
 
 v2 默认日志目录名带 `agreidv2_dt_` 前缀，不会与 v1 冲突。批量入口也接受
-数据集键，但 v2 必须只选择 baseline：
+数据集键（四组实验的要求见 `V2_MODULES.md`）：
 
 ```bash
 python scripts/run_all_ablations.py \

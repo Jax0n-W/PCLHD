@@ -34,6 +34,7 @@ from clustercontrast.utils.data import transforms as T
 from clustercontrast.utils.data.preprocessor import Preprocessor,Preprocessor_color
 from clustercontrast.utils.data.dynamic_agva import (
     add_dynamic_agva_arguments, get_dynamic_agva_process,
+    report_dynamic_agva_mask_coverage,
     print_dynamic_agva_config, validate_dynamic_agva_args,
 )
 from clustercontrast.utils.data.resolution_augment import (
@@ -597,10 +598,6 @@ def main():
         args.stage1_log_name, args.eps)
     args.stage2_log_name = append_stage2_eps_log_suffix(
         args.stage2_log_name, args.eps, args.eps_all)
-    if args.dataset_key == 'agreidv2' and args.use_dynamic_agva:
-        raise ValueError(
-            'AG-ReID.v2 currently supports baseline only; its D-AGVA masks '
-            'and three-domain view scores are not prepared')
     validate_dynamic_agva_args(args)
     print_dynamic_agva_config(args)
     print('DBSCAN backend: {}'.format(args.dbscan_backend))
@@ -669,6 +666,9 @@ def main_worker_stage1(args,log_s1_name):
     ir_name, rgb_name = get_training_dataset_names(args.dataset_key)
     dataset_ir = get_data(ir_name, args.data_dir,trial=trial)
     dataset_rgb = get_data(rgb_name, args.data_dir,trial=trial)
+    if getattr(args, 'use_dynamic_agva', False):
+        report_dynamic_agva_mask_coverage(
+            args, dataset_ir.train, dataset_ir.images_dir)
     resolution_augmenters = build_resolution_augmenters(
         args, dataset_ir.train, dataset_rgb.train, stage=1,
         aerial_root=dataset_ir.images_dir,

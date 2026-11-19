@@ -42,12 +42,27 @@ def camera_sort_key(camera: str) -> Tuple[int, str]:
 
 
 def parse_image_name(path: Path) -> Tuple[str, str]:
+    """Return ``(pid, camera)`` for LAGPeR, AG-ReID.v1 and AG-ReID.v2 names.
+
+    AG-ReID.v2 official names (``P0001T04041A1C0F121.jpg``) are mapped to the
+    same ``c{A}{C}`` camera token that AG-ReID.v1's rewritten training files
+    already use (``C10`` = A1, C0), so v2 folds can be defined exactly like v1:
+    aerial ``c00,c10,c20`` and ground ``c02,c03;c12,c13;c22,c23``.
+    """
+    try:
+        parsed = parse_agreid_name(path.name)
+    except ValueError:
+        parsed = None
+    if parsed is not None and parsed.source == "official":
+        return str(parsed.pid), "c{}{}".format(parsed.angle, parsed.camid)
+
     tokens = path.stem.split("_")
     cameras = [token.lower() for token in tokens if CAMERA_TOKEN_RE.fullmatch(token)]
     if not tokens[0] or len(cameras) != 1:
         raise ValueError(
             "Cannot uniquely parse pid/camera from {!r}; supported examples are "
-            "0001_c3_000002.jpg and P0001_T04041_C00_F121.jpg"
+            "0001_c3_000002.jpg, P0001_T04041_C00_F121.jpg and "
+            "P0001T04041A0C0F121.jpg"
             .format(path.name)
         )
     if tokens[0].lower().startswith("p") and any(

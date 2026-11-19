@@ -4,6 +4,7 @@ from __future__ import absolute_import
 
 import os.path as osp
 import random
+from pathlib import Path
 
 from .aerial_ground_augment import AGVAInfo, AerialGroundViewAugment
 from .schp_mask_loader import SCHPMaskLoader
@@ -97,6 +98,42 @@ def get_dynamic_agva_process(args, image_root):
     args._dynamic_agva_process = process
     args._dynamic_agva_image_root = effective_root
     return process
+
+
+def report_dynamic_agva_mask_coverage(args, samples, image_root,
+                                      printer=print):
+    """Check that every aerial training image resolves to one SCHP mask.
+
+    The online process silently falls back to the original image when a mask
+    is missing; this one-off check makes that fallback visible before
+    training.  With ``--dynamic-agva-strict-masks`` any gap is fatal.
+    Returns ``(found, total, first_missing_or_None)``.
+    """
+    process = get_dynamic_agva_process(args, image_root)
+    if process is None:
+        return 0, 0, None
+    loader = process.mask_loader
+    found = 0
+    first_missing = None
+    for sample in samples:
+        path = sample[0] if isinstance(sample, (tuple, list)) else sample
+        if not osp.isabs(path) and image_root:
+            path = osp.join(image_root, path)
+        if loader._find(Path(path)) is not None:
+            found += 1
+        elif first_missing is None:
+            first_missing = path
+    total = len(samples)
+    printer("[D-AGVA] mask coverage: {}/{} aerial training images ({:.2%})"
+            .format(found, total, (found / float(total)) if total else 0.0))
+    if first_missing is not None:
+        printer("[D-AGVA] first image without mask (falls back to original): "
+                "{}".format(first_missing))
+        if getattr(args, "dynamic_agva_strict_masks", False):
+            raise FileNotFoundError(
+                "D-AGVA strict masks: {} aerial images have no mask; first: {}"
+                .format(total - found, first_missing))
+    return found, total, first_missing
 
 
 def validate_dynamic_agva_args(args):

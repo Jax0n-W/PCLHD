@@ -53,10 +53,61 @@ def scan_domain(root: Path, domain: str) -> List[dict]:
     return rows
 
 
+def scan_mixed_root(
+    root: Path, aerial_cameras: List[str], ground_cameras: List[str]
+) -> List[dict]:
+    """Scan one directory that holds both domains (AG-ReID.v2 train_all).
+
+    The domain of every image is decided by its camera token alone; any
+    camera that is listed for neither domain is an error, never silently
+    dropped.
+    """
+    aerial_set = set(aerial_cameras)
+    ground_set = set(ground_cameras)
+    overlap = aerial_set & ground_set
+    if overlap:
+        raise ValueError(
+            "cameras listed as both aerial and ground: {}".format(
+                ", ".join(sorted(overlap, key=camera_sort_key))))
+    rows = []
+    unknown = Counter()
+    for path in discover_images(root):
+        pid, camera = parse_image_name(path)
+        if camera in aerial_set:
+            domain = "aerial"
+        elif camera in ground_set:
+            domain = "ground"
+        else:
+            unknown[camera] += 1
+            continue
+        rows.append(
+            {"image_path": str(path), "pid": pid, "camera": camera, "domain": domain}
+        )
+    if unknown:
+        raise ValueError(
+            "images from cameras assigned to no domain: {}".format(
+                dict(sorted(unknown.items(), key=lambda item: camera_sort_key(item[0])))))
+    return rows
+
+
 def build_records(args: argparse.Namespace) -> List[ViewRecord]:
-    rows = scan_domain(args.aerial_dir, "aerial") + scan_domain(
-        args.ground_dir, "ground"
-    )
+    if args.aerial_dir.resolve() == args.ground_dir.resolve():
+        if not args.aerial_cameras or not args.ground_folds:
+            raise ValueError(
+                "when --aerial-dir and --ground-dir are the same directory, "
+                "--aerial-cameras and --ground-folds must both be given so the "
+                "domain of every image is defined by its camera")
+        mixed_aerial = comma_list(args.aerial_cameras)
+        mixed_ground = [
+            camera
+            for group in parse_ground_folds(args.ground_folds, len(mixed_aerial))
+            for camera in group
+        ]
+        rows = scan_mixed_root(args.aerial_dir, mixed_aerial, mixed_ground)
+    else:
+        rows = scan_domain(args.aerial_dir, "aerial") + scan_domain(
+            args.ground_dir, "ground"
+        )
     aerial_present = sorted(
         {row["camera"] for row in rows if row["domain"] == "aerial"},
         key=camera_sort_key,
@@ -126,7 +177,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Build a camera-disjoint aerial/ground cross-validation manifest."
     )
-    parser.add_argument("--aerial-dir", type=Path, required=True)
+    parser.add_argument(
+        "--aerial-dir", type=Path, required=True,
+        help="Aerial image root. May equal --ground-dir (AG-ReID.v2 train_all); "
+        "domains are then assigned from --aerial-cameras/--ground-folds.")
     parser.add_argument("--ground-dir", type=Path, required=True)
     parser.add_argument(
         "--output", type=Path, default=Path("view_domain/outputs/view_manifest.csv")
@@ -152,6 +206,16 @@ def main() -> None:
     write_manifest(args.output, records)
     counts = Counter((row.fold, row.domain) for row in records)
     print("Wrote {} records to {}".format(len(records), args.output))
+    pids_by_fold = {}
+    for record in records:
+        pids_by_fold.setdefault(record.fold, set()).add(record.pid)
+    folds = sorted(pids_by_fold)
+    shared = set()
+    for index, fold in enumerate(folds):
+        for other in folds[index + 1:]:
+            shared |= pids_by_fold[fold] & pids_by_fold[other]
+    print("identities per fold: {} | identities shared across folds: {}".format(
+        {fold: len(pids_by_fold[fold]) for fold in folds}, len(shared)))
     for fold in sorted({record.fold for record in records}):
         print(
             "fold {} validation cameras: aerial={} ground={} | images: aerial={} ground={}".format(
