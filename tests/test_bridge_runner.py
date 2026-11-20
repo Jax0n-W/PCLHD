@@ -40,7 +40,22 @@ class BridgeRunnerTests(unittest.TestCase):
                          "random")
         self.assertEqual(command[command.index("--bridge-topk") + 1], "7")
         self.assertEqual(command[command.index("--bridge-ratio") + 1], "0.4")
+        self.assertEqual(command[command.index("--bgm-fallback") + 1],
+                         "pclhd")
         self.assertIn("--log-gt-match-accuracy", command)
+
+    def test_nearest_fallback_adds_log_suffix_and_is_forwarded(self):
+        args = parse(
+            "--dataset-key", "agreidv2", "--experiment", "bridge",
+            "--eps", "0.6", "--bgm-fallback", "nearest")
+        stage1, stage2 = runner.default_log_names(args)
+        self.assertEqual(
+            stage2,
+            "agreidv2_dt_bridge_d0_b1_nnfb_channel_off_s2_seed1_eps0.6")
+        command = runner.build_stage2_command(
+            args, "/tmp/model_best.pth.tar", stage1, stage2)
+        self.assertEqual(command[command.index("--bgm-fallback") + 1],
+                         "nearest")
 
     def test_dynamic_bridge_reuses_dynamic_stage1(self):
         args = parse(
@@ -78,6 +93,7 @@ class BridgeRunnerTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn("Bridge matching (Stage 2): True", text)
         self.assertIn("Bridge score: ground_knn", text)
+        self.assertIn("BGM fallback: pclhd", text)
         self.assertIn("_train_agreid_bridge_engine.py", text)
         self.assertIn(
             "agreidv2_dt_bridge_d0_b1_channel_off_s2_seed1_eps0.6",

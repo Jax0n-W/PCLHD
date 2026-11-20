@@ -22,9 +22,10 @@ For every Stage-2 epoch:
    `ceil(bridge_ratio * cluster_size)` near members, with at least one member.
 4. Normalize the selected features, average them, and normalize the mean to
    form the cluster's bridge center.
-5. Run the existing Hungarian BGM with ground full-cluster centers and aerial
-   bridge centers. The mapping applies to every member of the aerial cluster,
-   including its unselected far members.
+5. Run the baseline-compatible PCLHD BGM with ground full-cluster centers and
+   aerial bridge centers. This is the same padded Hungarian and second-pass
+   ground fallback used by the baseline Stage-2 PGM block. The mapping applies
+   to every member of the aerial cluster, including its unselected far members.
 6. Initialize aerial memory from the original full-cluster center, never the
    bridge center. The baseline alternating cross-view loss remains weighted
    by `0.25`.
@@ -39,6 +40,7 @@ participate in training.
 | `--bridge-score` | `ground_knn` | `ground_knn`, `view_csv`, or `random` |
 | `--bridge-topk` | `10` | Number of ground neighbours averaged by `ground_knn` |
 | `--bridge-ratio` | `0.5` | Near fraction selected independently inside each aerial cluster |
+| `--bgm-fallback` | `pclhd` | `pclhd` baseline matching or opt-in `nearest` total mapping |
 | `--view-score-file` | dataset default | OOF CSV used only by `view_csv` |
 | `--view-score-path-mode` | `basename` | CSV-to-training-file matching mode |
 | `--log-gt-match-accuracy` | off | Print majority-identity BGM accuracy; never affects training |
@@ -53,6 +55,19 @@ no fallback.
 
 `random` uses a local generator seeded with `seed + epoch`, providing a
 reproducible control without changing global RNG state.
+
+The default `pclhd` matching exactly follows baseline: when ground clusters
+outnumber aerial clusters, the cost matrix is padded with zero columns and
+ground rows assigned to padding receive the baseline second Hungarian pass.
+When ground clusters are fewer than aerial clusters, both mappings are empty
+and that epoch has no cross-view loss. `nearest` selects the previous total
+bidirectional mapping with nearest-prototype fallbacks; its generated Stage-2
+log name contains `_b1_nnfb` instead of `_b1`.
+
+Setting `--bridge-ratio 1.0` selects every non-outlier member. With the
+normalized clustering features this makes every bridge center equal to its
+normalized full-cluster center, so bridge matching degenerates to baseline
+matching and can be used as a control experiment.
 
 Each epoch logs aerial cluster count, near/far image counts, near/far mean
 scores, Hungarian pairs and fallbacks, and the fraction of aerial clusters
@@ -76,8 +91,8 @@ The accepted setup uses `eps=0.6`, fast DBSCAN, and the baseline Stage-1 best
 checkpoint:
 
 ```bash
-DATA=/data/home/lab338/wjj/datasets/AG-ReID.v2
-LOGS=/data/home/lab338/wjj/logs/PCLHD
+DATA=/data/home/lab338/wjj/dataset/AG-ReID.v2
+LOGS=/data/home/lab338/wjj/logs/agreidv2_main
 S1="$LOGS/agreidv2_dt_s1_d0_channel_off_seed1_eps0.6/1/model_best.pth.tar"
 
 python train_agreid.py \
@@ -88,6 +103,7 @@ python train_agreid.py \
   --eps 0.6 --dbscan-backend fast \
   --epochs 2 --iters 20 --seed 1 \
   --bridge-score ground_knn --bridge-topk 10 --bridge-ratio 0.5 \
+  --bgm-fallback pclhd \
   --log-gt-match-accuracy \
   --data-dir "$DATA" --logs-dir "$LOGS"
 ```

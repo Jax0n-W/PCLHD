@@ -22,9 +22,9 @@ from torch.backends import cudnn
 
 from ChannelAug import ChannelRandomErasing
 from clustercontrast.bridge_matching import (
-    BRIDGE_SCORE_MODES, bridge_centers, bridge_scores,
+    BGM_FALLBACK_MODES, BRIDGE_SCORE_MODES, bridge_centers, bridge_scores,
     bridge_selection_stats, gt_match_accuracy, matching_difference_stats,
-    select_near_members)
+    pclhd_bgm, select_near_members)
 from clustercontrast.models.cm import ClusterMemory
 from clustercontrast.three_domain import (
     build_bidirectional_bgm, generate_joint_cluster_features,
@@ -88,6 +88,9 @@ def _validate_args(args):
         raise ValueError("--bridge-topk must be at least 1")
     if not 0.0 < args.bridge_ratio <= 1.0:
         raise ValueError("--bridge-ratio must be in (0, 1]")
+    if args.bgm_fallback not in BGM_FALLBACK_MODES:
+        raise ValueError("unknown --bgm-fallback: {}".format(
+            args.bgm_fallback))
     if args.bridge_score == "view_csv":
         path = _resolve_project_path(args.view_score_file)
         if not path or not osp.isfile(path):
@@ -172,6 +175,12 @@ def _compute_epoch_bridge_scores(args, features_aerial, features_ground,
         scores = scores.cpu()
         del score_aerial, score_ground
     return scores
+
+
+def _match_centers(args, ground_centers, aerial_centers):
+    if args.bgm_fallback == "pclhd":
+        return pclhd_bgm(ground_centers, aerial_centers)
+    return build_bidirectional_bgm(ground_centers, aerial_centers)
 
 
 def main_worker_stage2(args):
@@ -306,11 +315,12 @@ def main_worker_stage2(args):
             labels_aerial, scores, near_mask)
 
         # source=ground, target=aerial preserves baseline r2i/i2r direction.
-        r2i, i2r, bridge_bgm_stats = build_bidirectional_bgm(
-            centers_ground, centers_bridge)
-        full_r2i, full_i2r, full_bgm_stats = build_bidirectional_bgm(
-            centers_ground, centers_aerial)
-        difference = matching_difference_stats(i2r, full_i2r)
+        r2i, i2r, bridge_bgm_stats = _match_centers(
+            args, centers_ground, centers_bridge)
+        full_r2i, full_i2r, full_bgm_stats = _match_centers(
+            args, centers_ground, centers_aerial)
+        difference = matching_difference_stats(
+            i2r, full_i2r, cluster_ids=range(num_aerial))
         print("==> Bridge clusters epoch {}: Aerial={}, Ground={}, ALL={}".format(
             epoch, num_aerial, num_ground, num_all))
         print("Bridge selection: near={}, far={}, outliers={}, "
@@ -472,6 +482,8 @@ def build_parser():
         default="ground_knn")
     parser.add_argument("--bridge-topk", type=int, default=10)
     parser.add_argument("--bridge-ratio", type=float, default=0.5)
+    parser.add_argument(
+        "--bgm-fallback", choices=BGM_FALLBACK_MODES, default="pclhd")
     parser.add_argument("--view-score-file", type=str, default="")
     parser.add_argument(
         "--view-score-path-mode", choices=VIEW_PATH_MODES,
@@ -503,6 +515,7 @@ def main(argv=None):
     print("Bridge score: {}".format(args.bridge_score))
     print("Bridge top-k: {}".format(args.bridge_topk))
     print("Bridge ratio: {}".format(args.bridge_ratio))
+    print("BGM fallback: {}".format(args.bgm_fallback))
     print("GT match diagnostics: {}".format(
         args.log_gt_match_accuracy))
     print("DBSCAN backend: {}".format(args.dbscan_backend))

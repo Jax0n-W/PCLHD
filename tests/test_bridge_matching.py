@@ -5,12 +5,48 @@ import unittest
 
 import numpy as np
 import torch
+from scipy.optimize import linear_sum_assignment
 from torch.nn import functional as F
 
 from clustercontrast.bridge_matching import (
     bridge_centers, bridge_selection_stats, ground_knn_scores,
-    gt_match_accuracy, matching_difference_stats, random_bridge_scores,
-    select_near_members)
+    gt_match_accuracy, matching_difference_stats, pclhd_bgm,
+    random_bridge_scores, select_near_members)
+
+
+def _baseline_pgm_reference(cluster_features_rgb, cluster_features_ir):
+    """Verbatim mapping logic from baseline engine's Stage-2 PGM block."""
+    num_cluster_rgb = cluster_features_rgb.size(0)
+    num_cluster_ir = cluster_features_ir.size(0)
+    i2r = {}
+    r2i = {}
+    R = []
+    bgm = False
+    if num_cluster_rgb >= num_cluster_ir:
+        # clusternorm
+        cluster_features_rgb = F.normalize(cluster_features_rgb, dim=1)
+        cluster_features_ir = F.normalize(cluster_features_ir, dim=1)
+        similarity = ((torch.mm(cluster_features_rgb, cluster_features_ir.T)) / 1).exp().cpu()
+        dis_similarity = (1 / (similarity))
+        cost = dis_similarity / 1
+        tmp = torch.zeros(dis_similarity.shape[0], dis_similarity.shape[0] - dis_similarity.shape[1])
+        cost = (torch.cat((cost, tmp), 1))
+        unmatched_row = []
+        row_ind, col_ind = linear_sum_assignment(cost)
+        for idx, item in enumerate(row_ind):
+            if col_ind[idx] < similarity.shape[1]:
+                R.append((row_ind[idx], col_ind[idx]))
+                r2i[row_ind[idx]] = col_ind[idx]
+                i2r[col_ind[idx]] = row_ind[idx]
+            else:
+                unmatched_row.append(row_ind[idx])
+        if bgm is False:
+            unmatched_cost = cost[unmatched_row][:, :dis_similarity.shape[1]]
+            unmatched_row_ind, unmatched_col_ind = linear_sum_assignment(unmatched_cost)
+            for idx, item in enumerate(unmatched_row_ind):
+                R.append((unmatched_row[idx], unmatched_col_ind[idx]))
+                r2i[unmatched_row[idx]] = unmatched_col_ind[idx]
+    return r2i, i2r
 
 
 class BridgeMatchingTests(unittest.TestCase):
@@ -82,6 +118,50 @@ class BridgeMatchingTests(unittest.TestCase):
             {0: 1, 1: 0, 2: 2}, {0: 1, 1: 2, 2: 2})
         self.assertEqual(result["different_clusters"], 1)
         self.assertAlmostEqual(result["different_ratio"], 1.0 / 3.0)
+
+    def test_pclhd_bgm_matches_baseline_reference(self):
+        generator = torch.Generator().manual_seed(23)
+        # More ground clusters, the exact 2x fallback boundary, and fewer
+        # ground clusters (where baseline disables cross-view loss).
+        for ground_count, aerial_count in ((4, 3), (6, 3), (2, 3)):
+            with self.subTest(
+                    ground_count=ground_count, aerial_count=aerial_count):
+                ground = torch.randn(
+                    ground_count, 9, generator=generator)
+                aerial = torch.randn(
+                    aerial_count, 9, generator=generator)
+                expected_r2i, expected_i2r = _baseline_pgm_reference(
+                    ground.clone(), aerial.clone())
+                actual_r2i, actual_i2r, stats = pclhd_bgm(
+                    ground, aerial)
+                self.assertEqual(actual_r2i, expected_r2i)
+                self.assertEqual(actual_i2r, expected_i2r)
+                self.assertEqual(stats["cross_view_enabled"], bool(expected_r2i))
+        self.assertEqual(pclhd_bgm(ground[:2], aerial)[0], {})
+        self.assertEqual(pclhd_bgm(ground[:2], aerial)[1], {})
+
+    def test_ratio_one_degenerates_to_normalized_full_centers(self):
+        generator = torch.Generator().manual_seed(29)
+        features = F.normalize(
+            torch.randn(9, 6, generator=generator), dim=1)
+        labels = torch.tensor([0, 0, 0, 1, 1, 2, 2, 2, 2])
+        scores = torch.linspace(0.0, 1.0, len(labels))
+        near, far = select_near_members(labels, scores, ratio=1.0)
+        self.assertTrue(bool(near.all()))
+        self.assertFalse(bool(far.any()))
+        bridge = bridge_centers(features, labels, near)
+        full = torch.stack([
+            features[labels == cluster_id].mean(dim=0)
+            for cluster_id in range(3)
+        ])
+        full = F.normalize(full, dim=1)
+        self.assertTrue(torch.allclose(bridge, full, atol=1e-7))
+
+        ground = torch.randn(5, 6, generator=generator)
+        bridge_r2i, bridge_i2r, _ = pclhd_bgm(ground, bridge)
+        full_r2i, full_i2r, _ = pclhd_bgm(ground, full)
+        self.assertEqual(bridge_r2i, full_r2i)
+        self.assertEqual(bridge_i2r, full_i2r)
 
 
 if __name__ == "__main__":

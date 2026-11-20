@@ -73,6 +73,8 @@ def build_parser():
         default="ground_knn")
     parser.add_argument("--bridge-topk", type=int, default=10)
     parser.add_argument("--bridge-ratio", type=float, default=0.50)
+    parser.add_argument(
+        "--bgm-fallback", choices=("pclhd", "nearest"), default="pclhd")
     parser.add_argument("--log-gt-match-accuracy", action="store_true")
     parser.add_argument(
         "--cluster-lock-file", default="",
@@ -182,6 +184,7 @@ def main(argv=None):
                 "--bridge-score", args.bridge_score,
                 "--bridge-topk", str(args.bridge_topk),
                 "--bridge-ratio", str(args.bridge_ratio),
+                "--bgm-fallback", args.bgm_fallback,
             ]
             if args.log_gt_match_accuracy:
                 command.append("--log-gt-match-accuracy")

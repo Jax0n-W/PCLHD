@@ -13,12 +13,76 @@ import math
 
 import numpy as np
 import torch
+from scipy.optimize import linear_sum_assignment
 from torch.nn import functional as F
 
 from agreid_identity import parse_agreid_name
 
 
 BRIDGE_SCORE_MODES = ("ground_knn", "view_csv", "random")
+BGM_FALLBACK_MODES = ("pclhd", "nearest")
+
+
+@torch.no_grad()
+def pclhd_bgm(ground_centers, aerial_centers):
+    """Reproduce the baseline Stage-2 PGM mapping and fallback semantics."""
+    if ground_centers.ndim != 2 or aerial_centers.ndim != 2:
+        raise ValueError("BGM feature matrices must be two-dimensional")
+    if ground_centers.size(0) == 0 or aerial_centers.size(0) == 0:
+        raise ValueError("BGM requires at least one cluster on each side")
+    if ground_centers.size(1) != aerial_centers.size(1):
+        raise ValueError("BGM feature dimensions do not match")
+
+    num_cluster_rgb = int(ground_centers.size(0))
+    num_cluster_ir = int(aerial_centers.size(0))
+    i2r = {}
+    r2i = {}
+    R = []
+    bgm = False
+    matched_pairs = 0
+    fallback_pairs = 0
+    if num_cluster_rgb >= num_cluster_ir:
+        # This block intentionally mirrors the baseline Stage-2 PGM code.
+        cluster_features_rgb = F.normalize(ground_centers, dim=1)
+        cluster_features_ir = F.normalize(aerial_centers, dim=1)
+        similarity = ((torch.mm(
+            cluster_features_rgb, cluster_features_ir.T)) / 1).exp().cpu()
+        dis_similarity = (1 / similarity)
+        cost = dis_similarity / 1
+        tmp = torch.zeros(
+            dis_similarity.shape[0],
+            dis_similarity.shape[0] - dis_similarity.shape[1])
+        cost = torch.cat((cost, tmp), 1)
+        unmatched_row = []
+        row_ind, col_ind = linear_sum_assignment(cost)
+        for idx, item in enumerate(row_ind):
+            if col_ind[idx] < similarity.shape[1]:
+                R.append((row_ind[idx], col_ind[idx]))
+                r2i[row_ind[idx]] = col_ind[idx]
+                i2r[col_ind[idx]] = row_ind[idx]
+                matched_pairs += 1
+            else:
+                unmatched_row.append(row_ind[idx])
+        if bgm is False:
+            unmatched_cost = cost[unmatched_row][:, :dis_similarity.shape[1]]
+            unmatched_row_ind, unmatched_col_ind = linear_sum_assignment(
+                unmatched_cost)
+            for idx, item in enumerate(unmatched_row_ind):
+                R.append((unmatched_row[idx], unmatched_col_ind[idx]))
+                r2i[unmatched_row[idx]] = unmatched_col_ind[idx]
+                fallback_pairs += 1
+
+    stats = {
+        "mode": "pclhd",
+        "ground_clusters": num_cluster_rgb,
+        "aerial_clusters": num_cluster_ir,
+        "hungarian_pairs": matched_pairs,
+        "ground_fallbacks": fallback_pairs,
+        "unmapped_ground": num_cluster_rgb - len(r2i),
+        "unmapped_aerial": num_cluster_ir - len(i2r),
+        "cross_view_enabled": bool(r2i),
+    }
+    return r2i, i2r, stats
 
 
 @torch.no_grad()

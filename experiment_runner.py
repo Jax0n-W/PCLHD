@@ -151,6 +151,8 @@ def build_parser():
         default="ground_knn")
     parser.add_argument("--bridge-topk", type=int, default=10)
     parser.add_argument("--bridge-ratio", type=float, default=0.50)
+    parser.add_argument(
+        "--bgm-fallback", choices=("pclhd", "nearest"), default="pclhd")
     parser.add_argument("--log-gt-match-accuracy", action="store_true")
     parser.add_argument(
         "--cluster-lock-file", default="",
@@ -257,9 +259,10 @@ def default_log_names(args, spec=None):
     stage1 = args.stage1_log_name or (
         "{}_s1_d{}_channel_off_seed{}".format(prefix, d_flag, args.seed))
     if spec.get("bridge", False):
+        fallback_suffix = "_nnfb" if args.bgm_fallback == "nearest" else ""
         stage2 = args.stage2_log_name or (
-            "{}_{}_d{}_b1_channel_off_s2_seed{}".format(
-                prefix, args.experiment, d_flag, args.seed))
+            "{}_{}_d{}_b1{}_channel_off_s2_seed{}".format(
+                prefix, args.experiment, d_flag, fallback_suffix, args.seed))
     else:
         stage2 = args.stage2_log_name or (
             "{}_{}_d{}_t{}_channel_off_s2_seed{}".format(
@@ -384,6 +387,7 @@ def build_stage2_command(args, checkpoint, stage1_log_name=None,
             "--bridge-score", args.bridge_score,
             "--bridge-topk", str(args.bridge_topk),
             "--bridge-ratio", str(args.bridge_ratio),
+            "--bgm-fallback", args.bgm_fallback,
             "--view-score-file", _path(args.view_score_file),
             "--view-score-path-mode", args.view_score_path_mode,
         ]
@@ -584,6 +588,7 @@ def _print_config(args, spec, stage1_log_name, stage2_log_name):
         print("Bridge top-k: {}".format(args.bridge_topk))
         print("Bridge ratio (within each cluster): {}".format(
             args.bridge_ratio))
+        print("BGM fallback: {}".format(args.bgm_fallback))
         print("Bridge GT match diagnostics: {}".format(
             args.log_gt_match_accuracy))
         if args.bridge_score == "view_csv":

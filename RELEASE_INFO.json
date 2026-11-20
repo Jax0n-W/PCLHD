@@ -146,6 +146,8 @@
     "bridge_score_default": "ground_knn",
     "bridge_topk_default": 10,
     "bridge_ratio_default": 0.5,
+    "bridge_bgm_fallback_default": "pclhd",
+    "bridge_bgm_fallback_modes": ["pclhd", "nearest"],
     "bridge_gt_match_accuracy_default": false,
     "cluster_lock_default": "disabled",
     "cluster_lock_environment": "PCLHD_CLUSTER_LOCK"
