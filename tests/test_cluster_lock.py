@@ -57,7 +57,8 @@ class ClusterLockTests(unittest.TestCase):
                 intervals[1][0] + 0.02, intervals[0][1])
 
     def test_runner_forwards_explicit_lock_to_every_engine(self):
-        for experiment in ("baseline", "three_domain", "bridge"):
+        for experiment in (
+                "baseline", "three_domain", "bridge", "confident"):
             args = runner.build_parser().parse_args([
                 "--experiment", experiment, "--cluster-lock-file",
                 "shared.lock", "--dry-run"])
@@ -72,9 +73,11 @@ class ClusterLockTests(unittest.TestCase):
 
     def test_batch_runner_accepts_bridge_and_shared_lock(self):
         args = batch_runner.build_parser().parse_args([
-            "--experiments", "bridge", "dynamic_bridge",
+            "--experiments", "bridge", "dynamic_bridge", "confident",
+            "dynamic_confident",
             "--cluster-lock-file", "shared.lock", "--dry-run"])
-        self.assertEqual(args.experiments, ["bridge", "dynamic_bridge"])
+        self.assertEqual(args.experiments, [
+            "bridge", "dynamic_bridge", "confident", "dynamic_confident"])
         self.assertIn("--cluster-lock-file", batch_runner.common_args(args))
 
 

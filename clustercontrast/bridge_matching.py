@@ -21,6 +21,112 @@ from agreid_identity import parse_agreid_name
 
 BRIDGE_SCORE_MODES = ("ground_knn", "view_csv", "random")
 BGM_FALLBACK_MODES = ("pclhd", "nearest")
+CROSS_CONFIDENCE_MODES = ("margin", "similarity")
+
+
+def cross_retain_ratio(epoch, start=0.4, end=1.0, ramp_epochs=20):
+    """Return the linear confidence-retention schedule for one epoch."""
+    epoch = int(epoch)
+    ramp_epochs = int(ramp_epochs)
+    start = float(start)
+    end = float(end)
+    if epoch < 0:
+        raise ValueError("cross-retain epoch cannot be negative")
+    if ramp_epochs < 1:
+        raise ValueError("cross-retain ramp epochs must be at least 1")
+    if not 0.0 < start <= end <= 1.0:
+        raise ValueError("cross-retain values must satisfy 0 < start <= end <= 1")
+    progress = min(1.0, float(epoch) / float(ramp_epochs))
+    return start + (end - start) * progress
+
+
+@torch.no_grad()
+def cross_view_mapping_confidences(ground_centers, aerial_centers,
+                                   i2r, r2i, mode="margin"):
+    """Score aerial->ground and ground->aerial mappings by cosine confidence."""
+    if mode not in CROSS_CONFIDENCE_MODES:
+        raise ValueError("unknown cross-confidence mode: {}".format(mode))
+    if ground_centers.ndim != 2 or aerial_centers.ndim != 2:
+        raise ValueError("cross-confidence centers must be two-dimensional")
+    if ground_centers.size(1) != aerial_centers.size(1):
+        raise ValueError("cross-confidence feature dimensions do not match")
+    if ground_centers.size(0) == 0 or aerial_centers.size(0) == 0:
+        raise ValueError("cross-confidence requires non-empty centers")
+    ground = F.normalize(ground_centers, p=2, dim=1)
+    aerial = F.normalize(aerial_centers, p=2, dim=1)
+    similarity = ground.mm(aerial.t())
+
+    def _score(vector, selected_index):
+        selected_index = int(selected_index)
+        if selected_index < 0 or selected_index >= vector.numel():
+            raise ValueError("cross-confidence mapping index is out of range")
+        selected = float(vector[selected_index].item())
+        if mode == "similarity" or vector.numel() == 1:
+            return selected
+        alternatives = torch.cat(
+            (vector[:selected_index], vector[selected_index + 1:]))
+        return selected - float(alternatives.max().item())
+
+    i2r_confidence = {}
+    for aerial_cluster, ground_cluster in i2r.items():
+        aerial_cluster = int(aerial_cluster)
+        ground_cluster = int(ground_cluster)
+        if aerial_cluster < 0 or aerial_cluster >= similarity.size(1):
+            raise ValueError("i2r aerial cluster is out of range")
+        i2r_confidence[aerial_cluster] = _score(
+            similarity[:, aerial_cluster], ground_cluster)
+
+    r2i_confidence = {}
+    for ground_cluster, aerial_cluster in r2i.items():
+        ground_cluster = int(ground_cluster)
+        aerial_cluster = int(aerial_cluster)
+        if ground_cluster < 0 or ground_cluster >= similarity.size(0):
+            raise ValueError("r2i ground cluster is out of range")
+        r2i_confidence[ground_cluster] = _score(
+            similarity[ground_cluster, :], aerial_cluster)
+    return i2r_confidence, r2i_confidence
+
+
+def retain_mapping_by_confidence(mapping, confidence, ratio,
+                                 total_clusters):
+    """Keep the top ceil(ratio * total_clusters) mapping keys."""
+    ratio = float(ratio)
+    total_clusters = int(total_clusters)
+    if not 0.0 < ratio <= 1.0:
+        raise ValueError("cross-retain ratio must be in (0, 1]")
+    if total_clusters < 0:
+        raise ValueError("cross-retain total clusters cannot be negative")
+    normalized_mapping = {
+        int(key): int(value) for key, value in mapping.items()}
+    normalized_confidence = {
+        int(key): float(value) for key, value in confidence.items()}
+    missing = sorted(set(normalized_mapping) - set(normalized_confidence))
+    if missing:
+        raise ValueError(
+            "missing confidence for mapping key {}".format(missing[0]))
+    keep_count = min(
+        len(normalized_mapping),
+        int(math.ceil(ratio * float(total_clusters))))
+    ordered = sorted(
+        normalized_mapping,
+        key=lambda key: (-normalized_confidence[key], key))
+    keep_keys = set(ordered[:keep_count])
+    retained = {
+        key: value for key, value in normalized_mapping.items()
+        if key in keep_keys}
+    removed = {
+        key: value for key, value in normalized_mapping.items()
+        if key not in keep_keys}
+    mean_confidence = (
+        float(np.mean([normalized_confidence[key] for key in keep_keys]))
+        if keep_keys else float("nan"))
+    stats = {
+        "retained": len(retained),
+        "available": len(normalized_mapping),
+        "total_clusters": total_clusters,
+        "mean_confidence": mean_confidence,
+    }
+    return retained, removed, stats
 
 
 @torch.no_grad()

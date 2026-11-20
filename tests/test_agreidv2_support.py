@@ -95,7 +95,8 @@ class AGReIDV2SupportTests(unittest.TestCase):
     def test_v2_accepts_all_experiments_in_dry_run(self):
         for experiment in (
                 "baseline", "dynamic", "three_domain", "full",
-                "bridge", "dynamic_bridge"):
+                "bridge", "dynamic_bridge", "confident",
+                "dynamic_confident"):
             args = parse(
                 "--dataset-key", "agreidv2", "--experiment", experiment,
                 "--data-dir", "/data/AG-ReID.v2")

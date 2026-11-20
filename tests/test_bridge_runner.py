@@ -70,6 +70,50 @@ class BridgeRunnerTests(unittest.TestCase):
         command = runner.build_stage1_command(args, stage1, stage2)
         self.assertIn("--use-dynamic-agva", command)
 
+    def test_confident_names_fixed_bridge_settings_and_parameters(self):
+        args = parse(
+            "--dataset-key", "agreidv2", "--experiment", "confident",
+            "--eps", "0.6", "--cross-retain-start", "0.3",
+            "--cross-retain-end", "0.9",
+            "--cross-retain-ramp-epochs", "12",
+            "--cross-confidence", "similarity",
+            "--bridge-ratio", "0.25", "--bgm-fallback", "nearest")
+        stage1, stage2 = runner.default_log_names(args)
+        self.assertEqual(
+            stage1, "agreidv2_dt_s1_d0_channel_off_seed1_eps0.6")
+        self.assertEqual(
+            stage2,
+            "agreidv2_dt_confident_d0_cr0.3-0.9r12_channel_off_s2_seed1_eps0.6")
+        command = runner.build_stage2_command(
+            args, "/tmp/model_best.pth.tar", stage1, stage2)
+        self.assertIn("--confident-cross", command)
+        self.assertEqual(command[command.index("--bridge-ratio") + 1], "1.0")
+        self.assertEqual(
+            command[command.index("--bgm-fallback") + 1], "pclhd")
+        self.assertEqual(
+            command[command.index("--cross-retain-start") + 1], "0.3")
+        self.assertEqual(
+            command[command.index("--cross-retain-end") + 1], "0.9")
+        self.assertEqual(
+            command[command.index("--cross-retain-ramp-epochs") + 1],
+            "12")
+        self.assertEqual(
+            command[command.index("--cross-confidence") + 1],
+            "similarity")
+
+    def test_dynamic_confident_reuses_dynamic_stage1(self):
+        args = parse(
+            "--dataset-key", "agreidv2",
+            "--experiment", "dynamic_confident", "--eps", "0.6")
+        stage1, stage2 = runner.default_log_names(args)
+        self.assertEqual(
+            stage1, "agreidv2_dt_s1_d1_channel_off_seed1_eps0.6")
+        self.assertEqual(
+            stage2,
+            "agreidv2_dt_dynamic_confident_d1_cr0.4-1.0r20_channel_off_s2_seed1_eps0.6")
+        command = runner.build_stage1_command(args, stage1, stage2)
+        self.assertIn("--use-dynamic-agva", command)
+
     def test_v1_bridge_uses_v1_dataset_without_dataset_key_override(self):
         args = parse("--experiment", "bridge", "--eps", "0.6")
         stage1, stage2 = runner.default_log_names(args)
@@ -97,6 +141,23 @@ class BridgeRunnerTests(unittest.TestCase):
         self.assertIn("_train_agreid_bridge_engine.py", text)
         self.assertIn(
             "agreidv2_dt_bridge_d0_b1_channel_off_s2_seed1_eps0.6",
+            text)
+
+    def test_confident_dry_run_prints_configuration(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = runner.run_experiment("agreidv2", argv=[
+                "--experiment", "confident", "--run-mode", "stage2",
+                "--stage1-checkpoint", "/tmp/model_best.pth.tar",
+                "--eps", "0.6", "--dry-run"])
+        text = output.getvalue()
+        self.assertEqual(result, 0)
+        self.assertIn("Confidence-aware cross matching (Stage 2): True", text)
+        self.assertIn("Fixed bridge ratio: 1.0", text)
+        self.assertIn("Fixed BGM fallback: pclhd", text)
+        self.assertIn("Cross confidence: margin", text)
+        self.assertIn(
+            "agreidv2_dt_confident_d0_cr0.4-1.0r20_channel_off_s2_seed1_eps0.6",
             text)
 
     def test_legacy_log_names_and_commands_have_no_bridge_tokens(self):

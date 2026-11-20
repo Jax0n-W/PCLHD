@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run controlled AG-ReID.v1/v2 baseline, three-domain, and bridge jobs.
+"""Run controlled baseline, three-domain, bridge, and confidence-aware jobs.
 
 Only two Stage-1 jobs are trained (D=0 and D=1); their best checkpoints are
 then reused by all selected Stage-2 experiments. The default selection remains
@@ -23,8 +23,10 @@ from experiment_runner import (
     DEFAULT_EPS, dataset_default_paths, eps_log_suffix)
 
 DEFAULT_EXPERIMENTS = ("baseline", "dynamic", "three_domain", "full")
-ALL_EXPERIMENTS = DEFAULT_EXPERIMENTS + ("bridge", "dynamic_bridge")
-DYNAMIC_EXPERIMENTS = {"dynamic", "full", "dynamic_bridge"}
+ALL_EXPERIMENTS = DEFAULT_EXPERIMENTS + (
+    "bridge", "dynamic_bridge", "confident", "dynamic_confident")
+DYNAMIC_EXPERIMENTS = {
+    "dynamic", "full", "dynamic_bridge", "dynamic_confident"}
 
 
 def build_parser():
@@ -75,6 +77,13 @@ def build_parser():
     parser.add_argument("--bridge-ratio", type=float, default=0.50)
     parser.add_argument(
         "--bgm-fallback", choices=("pclhd", "nearest"), default="pclhd")
+    parser.add_argument("--cross-retain-start", type=float, default=0.4)
+    parser.add_argument("--cross-retain-end", type=float, default=1.0)
+    parser.add_argument(
+        "--cross-retain-ramp-epochs", type=int, default=20)
+    parser.add_argument(
+        "--cross-confidence", choices=("margin", "similarity"),
+        default="margin")
     parser.add_argument("--log-gt-match-accuracy", action="store_true")
     parser.add_argument(
         "--cluster-lock-file", default="",
@@ -185,6 +194,16 @@ def main(argv=None):
                 "--bridge-topk", str(args.bridge_topk),
                 "--bridge-ratio", str(args.bridge_ratio),
                 "--bgm-fallback", args.bgm_fallback,
+            ]
+            if args.log_gt_match_accuracy:
+                command.append("--log-gt-match-accuracy")
+        elif experiment in ("confident", "dynamic_confident"):
+            command += [
+                "--cross-retain-start", str(args.cross_retain_start),
+                "--cross-retain-end", str(args.cross_retain_end),
+                "--cross-retain-ramp-epochs",
+                str(args.cross_retain_ramp_epochs),
+                "--cross-confidence", args.cross_confidence,
             ]
             if args.log_gt_match_accuracy:
                 command.append("--log-gt-match-accuracy")

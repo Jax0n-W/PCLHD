@@ -20,7 +20,8 @@ class ReleaseConfigurationTests(unittest.TestCase):
     def test_original_matrix_and_bridge_experiments(self):
         self.assertEqual(set(runner.EXPERIMENTS), {
             "baseline", "dynamic", "three_domain", "full",
-            "bridge", "dynamic_bridge"})
+            "bridge", "dynamic_bridge", "confident",
+            "dynamic_confident"})
         self.assertEqual(runner.EXPERIMENTS["baseline"], {
             "dynamic_agva": False, "three_domain": False})
         self.assertEqual(runner.EXPERIMENTS["dynamic"], {
@@ -35,6 +36,12 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertEqual(runner.EXPERIMENTS["dynamic_bridge"], {
             "dynamic_agva": True, "three_domain": False,
             "bridge": True})
+        self.assertEqual(runner.EXPERIMENTS["confident"], {
+            "dynamic_agva": False, "three_domain": False,
+            "bridge": True, "confident_cross": True})
+        self.assertEqual(runner.EXPERIMENTS["dynamic_confident"], {
+            "dynamic_agva": True, "three_domain": False,
+            "bridge": True, "confident_cross": True})
 
     def test_channel_mode_is_fixed_off_in_all_commands(self):
         for name in runner.EXPERIMENTS:
@@ -68,7 +75,9 @@ class ReleaseConfigurationTests(unittest.TestCase):
                 spec["three_domain"])
 
     def test_bridge_is_stage2_only(self):
-        for name in ("bridge", "dynamic_bridge"):
+        for name in (
+                "bridge", "dynamic_bridge", "confident",
+                "dynamic_confident"):
             args = parse("--experiment", name)
             stage1 = runner.build_stage1_command(args)
             stage2 = runner.build_stage2_command(

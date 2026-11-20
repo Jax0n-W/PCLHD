@@ -22,15 +22,19 @@ from torch.backends import cudnn
 
 from ChannelAug import ChannelRandomErasing
 from clustercontrast.bridge_matching import (
-    BGM_FALLBACK_MODES, BRIDGE_SCORE_MODES, bridge_centers, bridge_scores,
-    bridge_selection_stats, gt_match_accuracy, matching_difference_stats,
-    pclhd_bgm, select_near_members)
+    BGM_FALLBACK_MODES, BRIDGE_SCORE_MODES, CROSS_CONFIDENCE_MODES,
+    bridge_centers, bridge_scores, bridge_selection_stats,
+    cross_retain_ratio, cross_view_mapping_confidences, gt_match_accuracy,
+    matching_difference_stats, pclhd_bgm, retain_mapping_by_confidence,
+    select_near_members)
 from clustercontrast.models.cm import ClusterMemory
 from clustercontrast.three_domain import (
     build_bidirectional_bgm, generate_joint_cluster_features,
     joint_cross_modal_flags)
 from clustercontrast.trainers_no_ema_loss import \
     ClusterContrastTrainer_PCLMP_NoEMALoss
+from clustercontrast.trainers_confident_cross import \
+    ClusterContrastTrainer_PCLMP_ConfidentCross
 from clustercontrast.utils.cluster_lock import (
     cluster_lock, resolve_cluster_lock_file)
 from clustercontrast.utils.clustering import (
@@ -91,6 +95,21 @@ def _validate_args(args):
     if args.bgm_fallback not in BGM_FALLBACK_MODES:
         raise ValueError("unknown --bgm-fallback: {}".format(
             args.bgm_fallback))
+    if not 0.0 < args.cross_retain_start <= args.cross_retain_end <= 1.0:
+        raise ValueError(
+            "cross retention must satisfy 0 < start <= end <= 1")
+    if args.cross_retain_ramp_epochs < 1:
+        raise ValueError("--cross-retain-ramp-epochs must be at least 1")
+    if args.cross_confidence not in CROSS_CONFIDENCE_MODES:
+        raise ValueError("unknown --cross-confidence: {}".format(
+            args.cross_confidence))
+    if args.confident_cross:
+        if abs(args.bridge_ratio - 1.0) > 1e-12:
+            raise ValueError(
+                "confidence-aware cross matching requires --bridge-ratio 1.0")
+        if args.bgm_fallback != "pclhd":
+            raise ValueError(
+                "confidence-aware cross matching requires --bgm-fallback pclhd")
     if args.bridge_score == "view_csv":
         path = _resolve_project_path(args.view_score_file)
         if not path or not osp.isfile(path):
@@ -224,7 +243,10 @@ def main_worker_stage2(args):
         weight_decay=args.weight_decay)
     lr_scheduler = torch.optim.lr_scheduler.StepLR(
         optimizer, step_size=args.step_size, gamma=0.1)
-    trainer = ClusterContrastTrainer_PCLMP_NoEMALoss(model, model_ema)
+    trainer_class = (ClusterContrastTrainer_PCLMP_ConfidentCross
+                     if args.confident_cross
+                     else ClusterContrastTrainer_PCLMP_NoEMALoss)
+    trainer = trainer_class(model, model_ema)
 
     clusterers = baseline.build_agreid_stage2_clusterers(args)
     cluster_aerial = clusterers["ir"]
@@ -309,8 +331,15 @@ def main_worker_stage2(args):
             args, features_aerial, features_ground, csv_scores, epoch)
         near_mask, far_mask = select_near_members(
             labels_aerial, scores, ratio=args.bridge_ratio)
-        centers_bridge = bridge_centers(
-            features_aerial, labels_aerial, near_mask)
+        if abs(args.bridge_ratio - 1.0) <= 1e-12:
+            # Exact baseline control: extraction averages original/flip
+            # embeddings, so individual rows are not guaranteed unit norm.
+            # Reuse the baseline full-cluster centers instead of relying on
+            # normalized-member averaging to be numerically equivalent.
+            centers_bridge = centers_aerial
+        else:
+            centers_bridge = bridge_centers(
+                features_aerial, labels_aerial, near_mask)
         selection = bridge_selection_stats(
             labels_aerial, scores, near_mask)
 
@@ -342,6 +371,49 @@ def main_worker_stage2(args):
             _format_accuracy("full centers", gt_match_accuracy(
                 labels_aerial, aerial_names, labels_ground, ground_names,
                 full_i2r))
+
+        if args.confident_cross:
+            retain_ratio = cross_retain_ratio(
+                epoch, args.cross_retain_start, args.cross_retain_end,
+                args.cross_retain_ramp_epochs)
+            i2r_confidence, r2i_confidence = \
+                cross_view_mapping_confidences(
+                    centers_ground, centers_bridge, i2r, r2i,
+                    mode=args.cross_confidence)
+            retained_i2r, removed_i2r, i2r_stats = \
+                retain_mapping_by_confidence(
+                    i2r, i2r_confidence, retain_ratio, num_aerial)
+            retained_r2i, removed_r2i, r2i_stats = \
+                retain_mapping_by_confidence(
+                    r2i, r2i_confidence, retain_ratio, num_ground)
+            print("Confidence-aware cross mapping: epoch={}, rho={:.6f}, "
+                  "mode={}".format(
+                      epoch, retain_ratio, args.cross_confidence))
+            print("  i2r retained={}/{}, available={}, "
+                  "mean_confidence={:.6f}".format(
+                      i2r_stats["retained"], i2r_stats["total_clusters"],
+                      i2r_stats["available"],
+                      i2r_stats["mean_confidence"]))
+            print("  r2i retained={}/{}, available={}, "
+                  "mean_confidence={:.6f}".format(
+                      r2i_stats["retained"], r2i_stats["total_clusters"],
+                      r2i_stats["available"],
+                      r2i_stats["mean_confidence"]))
+            if args.log_gt_match_accuracy:
+                _format_accuracy("retained i2r", gt_match_accuracy(
+                    labels_aerial, aerial_names,
+                    labels_ground, ground_names, retained_i2r))
+                _format_accuracy("removed i2r", gt_match_accuracy(
+                    labels_aerial, aerial_names,
+                    labels_ground, ground_names, removed_i2r))
+                _format_accuracy("retained r2i", gt_match_accuracy(
+                    labels_ground, ground_names,
+                    labels_aerial, aerial_names, retained_r2i))
+                _format_accuracy("removed r2i", gt_match_accuracy(
+                    labels_ground, ground_names,
+                    labels_aerial, aerial_names, removed_r2i))
+            i2r = retained_i2r
+            r2i = retained_r2i
 
         pseudo_aerial = [
             (fname, int(label), cid)
@@ -484,6 +556,14 @@ def build_parser():
     parser.add_argument("--bridge-ratio", type=float, default=0.5)
     parser.add_argument(
         "--bgm-fallback", choices=BGM_FALLBACK_MODES, default="pclhd")
+    parser.add_argument("--confident-cross", action="store_true")
+    parser.add_argument("--cross-retain-start", type=float, default=0.4)
+    parser.add_argument("--cross-retain-end", type=float, default=1.0)
+    parser.add_argument(
+        "--cross-retain-ramp-epochs", type=int, default=20)
+    parser.add_argument(
+        "--cross-confidence", choices=CROSS_CONFIDENCE_MODES,
+        default="margin")
     parser.add_argument("--view-score-file", type=str, default="")
     parser.add_argument(
         "--view-score-path-mode", choices=VIEW_PATH_MODES,
@@ -516,6 +596,13 @@ def main(argv=None):
     print("Bridge top-k: {}".format(args.bridge_topk))
     print("Bridge ratio: {}".format(args.bridge_ratio))
     print("BGM fallback: {}".format(args.bgm_fallback))
+    print("Confidence-aware cross matching: {}".format(
+        args.confident_cross))
+    if args.confident_cross:
+        print("Cross retention: start={}, end={}, ramp_epochs={}".format(
+            args.cross_retain_start, args.cross_retain_end,
+            args.cross_retain_ramp_epochs))
+        print("Cross confidence: {}".format(args.cross_confidence))
     print("GT match diagnostics: {}".format(
         args.log_gt_match_accuracy))
     print("DBSCAN backend: {}".format(args.dbscan_backend))

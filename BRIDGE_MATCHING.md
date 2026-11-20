@@ -6,9 +6,9 @@ clustering, one ALL clustering, `PCLMP_NoEMALoss`, `CMhard`, the second
 ALL-memory optimization, EMA updates, evaluation, and checkpoint selection.
 Only the aerial prototype used for aerial/ground bipartite matching changes.
 
-Default `baseline`, `dynamic`, `three_domain`, and `full` commands and log
-names are unchanged. The bridge path is selected only by `--experiment bridge`
-or `--experiment dynamic_bridge`.
+The commands and log names of `baseline`, `dynamic`, `three_domain`, `full`,
+`bridge`, and `dynamic_bridge` are unchanged. The bridge path is selected only
+by an explicit bridge or confidence-aware experiment.
 
 ## Algorithm
 
@@ -64,10 +64,10 @@ and that epoch has no cross-view loss. `nearest` selects the previous total
 bidirectional mapping with nearest-prototype fallbacks; its generated Stage-2
 log name contains `_b1_nnfb` instead of `_b1`.
 
-Setting `--bridge-ratio 1.0` selects every non-outlier member. With the
-normalized clustering features this makes every bridge center equal to its
-normalized full-cluster center, so bridge matching degenerates to baseline
-matching and can be used as a control experiment.
+Setting `--bridge-ratio 1.0` selects every non-outlier member and the engine
+explicitly reuses the baseline full-cluster centers. Bridge matching therefore
+degenerates exactly to baseline matching and can be used as a control
+experiment even when original/flip feature averaging changes row norms.
 
 Each epoch logs aerial cluster count, near/far image counts, near/far mean
 scores, Hungarian pairs and fallbacks, and the fraction of aerial clusters
@@ -75,6 +75,35 @@ whose bridge-center and full-center matches differ. With
 `--log-gt-match-accuracy`, filenames are parsed by
 `agreid_identity.parse_agreid_name`; majority-identity accuracy is printed for
 both mappings and is never consumed by optimization.
+
+## Confidence-aware cross-view matching
+
+`confident` and `dynamic_confident` are separate opt-in experiments. Their
+Stage 2 uses this bridge engine with `--bridge-ratio 1.0` and
+`--bgm-fallback pclhd`, so the unfiltered centers and mappings are the same as
+baseline. `confident` reuses the d0 Stage-1 checkpoint;
+`dynamic_confident` reuses d1.
+
+| Parameter | Default | Meaning |
+|---|---:|---|
+| `--cross-retain-start` | `0.4` | Mapping fraction at Stage-2 epoch 0 |
+| `--cross-retain-end` | `1.0` | Final mapping fraction |
+| `--cross-retain-ramp-epochs` | `20` | Linear-ramp duration |
+| `--cross-confidence` | `margin` | `margin` or matched `similarity` |
+
+At epoch `e`, retention is
+`start + (end - start) * min(1, e / ramp_epochs)`. Aerial-to-ground and
+ground-to-aerial mappings are ranked independently. Margin confidence is the
+matched cosine similarity minus the best unmatched alternative in the same
+direction. Samples whose source cluster is not retained contribute no
+cross-view loss. The remaining samples are averaged normally; the `0.25`
+weight and odd/even alternating direction are unchanged. At retention `1.0`,
+the trainer is loss-equivalent to the baseline no-EMA-loss trainer.
+
+Every epoch logs the retention ratio, retained/total mappings, and retained
+mean confidence. With `--log-gt-match-accuracy`, retained and removed GT
+matching accuracy is printed separately for both directions and never affects
+training.
 
 ## Difference from three-domain matching
 
@@ -117,6 +146,25 @@ For the dynamic variant, replace `bridge` with `dynamic_bridge` and use:
 ```text
 agreidv2_dt_s1_d1_channel_off_seed1_eps0.6/1/model_best.pth.tar
 ```
+
+Confidence-aware v2 smoke test:
+
+```bash
+python train_agreid.py \
+  --dataset-key agreidv2 \
+  --experiment confident \
+  --run-mode stage2 \
+  --stage1-checkpoint "$S1" \
+  --eps 0.6 --dbscan-backend fast \
+  --epochs 2 --iters 20 --seed 1 \
+  --cross-retain-start 0.4 --cross-retain-end 1.0 \
+  --cross-retain-ramp-epochs 20 --cross-confidence margin \
+  --log-gt-match-accuracy \
+  --data-dir "$DATA" --logs-dir "$LOGS"
+```
+
+Its default Stage-2 log name is
+`agreidv2_dt_confident_d0_cr0.4-1.0r20_channel_off_s2_seed1_eps0.6`.
 
 ## Two GPUs with one clustering lock
 

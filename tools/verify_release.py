@@ -26,6 +26,7 @@ REQUIRED = (
     "clustercontrast/utils/fast_dbscan.py",
     "clustercontrast/utils/cluster_lock.py",
     "clustercontrast/bridge_matching.py",
+    "clustercontrast/trainers_confident_cross.py",
     "examples/PCLHD_AGReIDv2_test.py",
     "tools/preflight_agreidv2.py",
     "tests/test_release_configuration.py",
@@ -36,6 +37,8 @@ REQUIRED = (
     "tests/test_bridge_matching.py",
     "tests/test_bridge_runner.py",
     "tests/test_cluster_lock.py",
+    "tests/test_confident_cross.py",
+    "tools/analyze_cross_view_matching.py",
     "tools/verify_fast_dbscan.py",
     "V2_MODULES.md",
     "BRIDGE_MATCHING.md",
@@ -134,7 +137,7 @@ def main():
     if ok:
         print("RELEASE_VERIFICATION_PASSED")
         print("Channel conversion augmentation: OFF in both stages")
-        print("Controlled experiments: baseline, dynamic, three_domain, full, bridge, dynamic_bridge")
+        print("Controlled experiments: baseline, dynamic, three_domain, full, bridge, dynamic_bridge, confident, dynamic_confident")
         return 0
     return 1
 

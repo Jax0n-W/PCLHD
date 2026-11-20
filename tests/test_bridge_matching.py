@@ -10,8 +10,9 @@ from torch.nn import functional as F
 
 from clustercontrast.bridge_matching import (
     bridge_centers, bridge_selection_stats, ground_knn_scores,
-    gt_match_accuracy, matching_difference_stats, pclhd_bgm,
-    random_bridge_scores, select_near_members)
+    cross_retain_ratio, cross_view_mapping_confidences, gt_match_accuracy,
+    matching_difference_stats, pclhd_bgm, random_bridge_scores,
+    retain_mapping_by_confidence, select_near_members)
 
 
 def _baseline_pgm_reference(cluster_features_rgb, cluster_features_ir):
@@ -162,6 +163,56 @@ class BridgeMatchingTests(unittest.TestCase):
         full_r2i, full_i2r, _ = pclhd_bgm(ground, full)
         self.assertEqual(bridge_r2i, full_r2i)
         self.assertEqual(bridge_i2r, full_i2r)
+
+    def test_cross_retain_schedule(self):
+        self.assertAlmostEqual(cross_retain_ratio(0, 0.4, 1.0, 20), 0.4)
+        self.assertAlmostEqual(cross_retain_ratio(10, 0.4, 1.0, 20), 0.7)
+        self.assertAlmostEqual(cross_retain_ratio(20, 0.4, 1.0, 20), 1.0)
+        self.assertAlmostEqual(cross_retain_ratio(99, 0.4, 1.0, 20), 1.0)
+
+    def test_bidirectional_margin_and_similarity_confidence(self):
+        ground = torch.tensor([
+            [1.0, 0.0], [0.0, 1.0], [-1.0, 0.0]])
+        aerial = torch.tensor([[0.8, 0.2], [0.0, 1.0]])
+        i2r = {0: 0, 1: 1}
+        r2i = {0: 0, 1: 1, 2: 0}
+        similarity = F.normalize(ground, dim=1).mm(
+            F.normalize(aerial, dim=1).t())
+
+        i_margin, r_margin = cross_view_mapping_confidences(
+            ground, aerial, i2r, r2i, mode="margin")
+        self.assertAlmostEqual(
+            i_margin[0],
+            float(similarity[0, 0] - similarity[1:, 0].max()), places=6)
+        self.assertAlmostEqual(
+            i_margin[1],
+            float(similarity[1, 1]
+                  - torch.stack((similarity[0, 1], similarity[2, 1])).max()),
+            places=6)
+        self.assertAlmostEqual(
+            r_margin[0],
+            float(similarity[0, 0] - similarity[0, 1]), places=6)
+
+        i_similarity, r_similarity = cross_view_mapping_confidences(
+            ground, aerial, i2r, r2i, mode="similarity")
+        self.assertAlmostEqual(i_similarity[0], float(similarity[0, 0]))
+        self.assertAlmostEqual(r_similarity[2], float(similarity[2, 0]))
+
+    def test_retain_mapping_rounds_up_and_is_deterministic(self):
+        mapping = {0: 10, 1: 11, 2: 12, 3: 13}
+        confidence = {0: 0.2, 1: 0.9, 2: 0.8, 3: 0.1}
+        retained, removed, stats = retain_mapping_by_confidence(
+            mapping, confidence, ratio=0.4, total_clusters=4)
+        self.assertEqual(retained, {1: 11, 2: 12})
+        self.assertEqual(removed, {0: 10, 3: 13})
+        self.assertEqual(stats["retained"], 2)
+        self.assertAlmostEqual(stats["mean_confidence"], 0.85)
+
+        retained_all, removed_all, _ = retain_mapping_by_confidence(
+            {0: 10, 2: 12}, {0: 0.2, 2: 0.8},
+            ratio=1.0, total_clusters=4)
+        self.assertEqual(retained_all, {0: 10, 2: 12})
+        self.assertEqual(removed_all, {})
 
 
 if __name__ == "__main__":

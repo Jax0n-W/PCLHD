@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Controlled AG-ReID baseline, three-domain, and bridge launcher.
+"""Controlled AG-ReID baseline, three-domain, bridge, and confidence launcher.
 
 Both AG-ReID.v1 and AG-ReID.v2 retain the original 2x2 D-AGVA/three-domain
-matrix and add opt-in bridge/dynamic_bridge Stage-2 experiments. Channel
-augmentation stays fixed off. v1 keeps its historical default paths; v2
-derives SCHP and view-score paths from ``--data-dir`` when not explicit.
+matrix and add opt-in bridge and confidence-aware Stage-2 experiments.
+Channel augmentation stays fixed off. v1 keeps its historical default paths;
+v2 derives SCHP and view-score paths from ``--data-dir`` when not explicit.
 """
 from __future__ import absolute_import, print_function
 
@@ -32,6 +32,12 @@ EXPERIMENTS = {
         "dynamic_agva": False, "three_domain": False, "bridge": True},
     "dynamic_bridge": {
         "dynamic_agva": True, "three_domain": False, "bridge": True},
+    "confident": {
+        "dynamic_agva": False, "three_domain": False, "bridge": True,
+        "confident_cross": True},
+    "dynamic_confident": {
+        "dynamic_agva": True, "three_domain": False, "bridge": True,
+        "confident_cross": True},
 }
 
 DEFAULT_DATA_DIR = "/home/lab338/Jaxon/dataset/AGreid_train"
@@ -153,6 +159,13 @@ def build_parser():
     parser.add_argument("--bridge-ratio", type=float, default=0.50)
     parser.add_argument(
         "--bgm-fallback", choices=("pclhd", "nearest"), default="pclhd")
+    parser.add_argument("--cross-retain-start", type=float, default=0.4)
+    parser.add_argument("--cross-retain-end", type=float, default=1.0)
+    parser.add_argument(
+        "--cross-retain-ramp-epochs", type=int, default=20)
+    parser.add_argument(
+        "--cross-confidence", choices=("margin", "similarity"),
+        default="margin")
     parser.add_argument("--log-gt-match-accuracy", action="store_true")
     parser.add_argument(
         "--cluster-lock-file", default="",
@@ -258,7 +271,14 @@ def default_log_names(args, spec=None):
     prefix = "agreidv2_dt" if args.dataset_key == "agreidv2" else "agreid_dt"
     stage1 = args.stage1_log_name or (
         "{}_s1_d{}_channel_off_seed{}".format(prefix, d_flag, args.seed))
-    if spec.get("bridge", False):
+    if spec.get("confident_cross", False):
+        stage2 = args.stage2_log_name or (
+            "{}_{}_d{}_cr{}-{}r{}_channel_off_s2_seed{}".format(
+                prefix, args.experiment, d_flag,
+                str(float(args.cross_retain_start)),
+                str(float(args.cross_retain_end)),
+                args.cross_retain_ramp_epochs, args.seed))
+    elif spec.get("bridge", False):
         fallback_suffix = "_nnfb" if args.bgm_fallback == "nearest" else ""
         stage2 = args.stage2_log_name or (
             "{}_{}_d{}_b1{}_channel_off_s2_seed{}".format(
@@ -378,6 +398,7 @@ def build_stage2_command(args, checkpoint, stage1_log_name=None,
     stage2_log_name = stage2_log_name or default_s2
     checkpoint = _path(checkpoint)
     if spec.get("bridge", False):
+        confident_cross = spec.get("confident_cross", False)
         command = [
             sys.executable,
             osp.join(PROJECT_ROOT, "_train_agreid_bridge_engine.py")]
@@ -386,11 +407,22 @@ def build_stage2_command(args, checkpoint, stage1_log_name=None,
             "--stage2-only", "--stage1-checkpoint", checkpoint,
             "--bridge-score", args.bridge_score,
             "--bridge-topk", str(args.bridge_topk),
-            "--bridge-ratio", str(args.bridge_ratio),
-            "--bgm-fallback", args.bgm_fallback,
+            "--bridge-ratio", ("1.0" if confident_cross
+                               else str(args.bridge_ratio)),
+            "--bgm-fallback", ("pclhd" if confident_cross
+                               else args.bgm_fallback),
             "--view-score-file", _path(args.view_score_file),
             "--view-score-path-mode", args.view_score_path_mode,
         ]
+        if confident_cross:
+            command += [
+                "--confident-cross",
+                "--cross-retain-start", str(args.cross_retain_start),
+                "--cross-retain-end", str(args.cross_retain_end),
+                "--cross-retain-ramp-epochs",
+                str(args.cross_retain_ramp_epochs),
+                "--cross-confidence", args.cross_confidence,
+            ]
         if args.log_gt_match_accuracy:
             command.append("--log-gt-match-accuracy")
         command += _resolution_args(args)
@@ -509,6 +541,11 @@ def validate_args(args):
         raise ValueError("--bridge-topk must be at least 1")
     if not 0.0 < args.bridge_ratio <= 1.0:
         raise ValueError("--bridge-ratio must be in (0, 1]")
+    if not 0.0 < args.cross_retain_start <= args.cross_retain_end <= 1.0:
+        raise ValueError(
+            "cross retention must satisfy 0 < start <= end <= 1")
+    if args.cross_retain_ramp_epochs < 1:
+        raise ValueError("--cross-retain-ramp-epochs must be at least 1")
     if (args.dump_cluster_dist_epoch < -1
             or args.dump_cluster_dist_epoch >= args.epochs):
         raise ValueError(
@@ -584,16 +621,30 @@ def _print_config(args, spec, stage1_log_name, stage2_log_name):
         print("View score file: {}".format(_path(args.view_score_file)))
         print("View near ratio (per camera): {}".format(args.view_near_ratio))
     if spec.get("bridge", False):
+        effective_bridge_ratio = (
+            1.0 if spec.get("confident_cross", False)
+            else args.bridge_ratio)
+        effective_bgm_fallback = (
+            "pclhd" if spec.get("confident_cross", False)
+            else args.bgm_fallback)
         print("Bridge score: {}".format(args.bridge_score))
         print("Bridge top-k: {}".format(args.bridge_topk))
         print("Bridge ratio (within each cluster): {}".format(
-            args.bridge_ratio))
-        print("BGM fallback: {}".format(args.bgm_fallback))
+            effective_bridge_ratio))
+        print("BGM fallback: {}".format(effective_bgm_fallback))
         print("Bridge GT match diagnostics: {}".format(
             args.log_gt_match_accuracy))
         if args.bridge_score == "view_csv":
             print("Bridge view score file: {}".format(
                 _path(args.view_score_file)))
+    if spec.get("confident_cross", False):
+        print("Confidence-aware cross matching (Stage 2): True")
+        print("Fixed bridge ratio: 1.0")
+        print("Fixed BGM fallback: pclhd")
+        print("Cross retention: start={}, end={}, ramp_epochs={}".format(
+            args.cross_retain_start, args.cross_retain_end,
+            args.cross_retain_ramp_epochs))
+        print("Cross confidence: {}".format(args.cross_confidence))
     print("Cluster lock: {}".format(
         _path(args.cluster_lock_file) if args.cluster_lock_file else
         os.environ.get("PCLHD_CLUSTER_LOCK", "disabled")))

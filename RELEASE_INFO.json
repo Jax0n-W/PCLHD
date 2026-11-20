@@ -1,6 +1,6 @@
 {
   "release_name": "PCLHD_AGReID_bridge_release_20261120",
-  "dataset": "AG-ReID.v1 plus AG-ReID.v2 (baseline, three-domain, and bridge matching)",
+  "dataset": "AG-ReID.v1 plus AG-ReID.v2 (baseline, three-domain, bridge, and confidence-aware matching)",
   "identity_rule": "concatenate P, T, and A filename fields",
   "expected_train_identities": 199,
   "expected_test_identities": 189,
@@ -16,7 +16,9 @@
         "three_domain",
         "full",
         "bridge",
-        "dynamic_bridge"
+        "dynamic_bridge",
+        "confident",
+        "dynamic_confident"
       ]
     },
     "agreidv2": {
@@ -28,7 +30,9 @@
         "three_domain",
         "full",
         "bridge",
-        "dynamic_bridge"
+        "dynamic_bridge",
+        "confident",
+        "dynamic_confident"
       ],
       "train_images": 51530,
       "train_identities": 807,
@@ -95,7 +99,7 @@
       }
     }
   },
-  "purpose": "Controlled Stage-1 D-AGVA experiments with baseline, three-domain, and cluster-selected bridge Stage-2 matching",
+  "purpose": "Controlled Stage-1 D-AGVA experiments with baseline, three-domain, cluster-selected bridge, and confidence-aware Stage-2 matching",
   "experiments": {
     "baseline": {
       "dynamic_agva": false,
@@ -122,6 +126,18 @@
       "dynamic_agva": true,
       "three_domain": false,
       "bridge_matching": true
+    },
+    "confident": {
+      "dynamic_agva": false,
+      "three_domain": false,
+      "bridge_matching": true,
+      "confident_cross": true
+    },
+    "dynamic_confident": {
+      "dynamic_agva": true,
+      "three_domain": false,
+      "bridge_matching": true,
+      "confident_cross": true
     }
   },
   "fixed_settings": {
@@ -149,6 +165,10 @@
     "bridge_bgm_fallback_default": "pclhd",
     "bridge_bgm_fallback_modes": ["pclhd", "nearest"],
     "bridge_gt_match_accuracy_default": false,
+    "confident_cross_retain_start_default": 0.4,
+    "confident_cross_retain_end_default": 1.0,
+    "confident_cross_retain_ramp_epochs_default": 20,
+    "confident_cross_confidence_default": "margin",
     "cluster_lock_default": "disabled",
     "cluster_lock_environment": "PCLHD_CLUSTER_LOCK"
   },
