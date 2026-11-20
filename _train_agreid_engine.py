@@ -49,6 +49,8 @@ from clustercontrast.utils.clustering import (
     resolve_eps_all)
 from clustercontrast.utils.fast_dbscan import \
     dump_cluster_distance_if_requested
+from clustercontrast.utils.cluster_lock import (
+    cluster_lock, resolve_cluster_lock_file)
 from clustercontrast.utils.serialization import load_checkpoint, save_checkpoint
 from clustercontrast.utils.faiss_rerank import compute_jaccard_distance,compute_modal_invariant_jaccard_distance
 from clustercontrast.utils.data.sampler import RandomMultipleGallerySampler, RandomMultipleGallerySamplerNoCam
@@ -584,6 +586,8 @@ def check_experiment_output_directory(output_dir, allow_overwrite=False):
 
 def main():
     args = parser.parse_args()
+    args.cluster_lock_file = resolve_cluster_lock_file(
+        args.cluster_lock_file)
     if (args.dump_cluster_dist_epoch < -1
             or args.dump_cluster_dist_epoch >= args.epochs):
         parser.error(
@@ -601,6 +605,8 @@ def main():
     validate_dynamic_agva_args(args)
     print_dynamic_agva_config(args)
     print('DBSCAN backend: {}'.format(args.dbscan_backend))
+    print('Cluster lock: {}'.format(
+        args.cluster_lock_file if args.cluster_lock_file else 'disabled'))
     args.logs_root = osp.abspath(osp.expanduser(args.logs_dir))
 
     if args.seed is not None:
@@ -729,57 +735,60 @@ def main_worker_stage1(args,log_s1_name):
                 getattr(args, 'debug_nonfinite', False))
 
 
-            # Adaptive clustering for IR: if no clusters found, increase eps gradually
-            rerank_dist_ir = compute_jaccard_distance(features_ir, k1=args.k1, k2=args.k2,search_option=3)
-            max_attempts = 10
-            attempt = 0
-            while attempt < max_attempts:
-                ir_eps_used = cluster_ir.eps
-                pseudo_labels_ir = cluster_ir.fit_predict(rerank_dist_ir)
-                num_cluster_ir = len(set(pseudo_labels_ir)) - (1 if -1 in pseudo_labels_ir else 0)
-                if num_cluster_ir > 0:
-                    break
-                cluster_ir.eps += 0.05
-                print('IR: no clusters found, increasing eps to {:.3f} and re-clustering...'.format(cluster_ir.eps))
-                attempt += 1
-            if num_cluster_ir == 0:
-                print('WARNING: IR clustering failed after {} attempts, assigning all samples to cluster 0'.format(max_attempts))
-                pseudo_labels_ir = np.zeros(len(features_ir), dtype=np.int32)
-                num_cluster_ir = 1
-            del rerank_dist_ir
+            with cluster_lock(
+                    getattr(args, 'cluster_lock_file', ''),
+                    label='Stage 1 epoch {}'.format(epoch)):
+                # Adaptive clustering for IR: if no clusters found, increase eps gradually
+                rerank_dist_ir = compute_jaccard_distance(features_ir, k1=args.k1, k2=args.k2,search_option=3)
+                max_attempts = 10
+                attempt = 0
+                while attempt < max_attempts:
+                    ir_eps_used = cluster_ir.eps
+                    pseudo_labels_ir = cluster_ir.fit_predict(rerank_dist_ir)
+                    num_cluster_ir = len(set(pseudo_labels_ir)) - (1 if -1 in pseudo_labels_ir else 0)
+                    if num_cluster_ir > 0:
+                        break
+                    cluster_ir.eps += 0.05
+                    print('IR: no clusters found, increasing eps to {:.3f} and re-clustering...'.format(cluster_ir.eps))
+                    attempt += 1
+                if num_cluster_ir == 0:
+                    print('WARNING: IR clustering failed after {} attempts, assigning all samples to cluster 0'.format(max_attempts))
+                    pseudo_labels_ir = np.zeros(len(features_ir), dtype=np.int32)
+                    num_cluster_ir = 1
+                del rerank_dist_ir
 
-            # Adaptive clustering for RGB
-            rerank_dist_rgb = compute_jaccard_distance(features_rgb, k1=args.k1, k2=args.k2,search_option=3)
-            cluster_rgb.eps = getattr(cluster_rgb, 'eps', args.eps)
-            attempt = 0
-            while attempt < max_attempts:
-                rgb_eps_used = cluster_rgb.eps
-                pseudo_labels_rgb = cluster_rgb.fit_predict(rerank_dist_rgb)
-                num_cluster_rgb = len(set(pseudo_labels_rgb)) - (1 if -1 in pseudo_labels_rgb else 0)
-                if num_cluster_rgb > 0:
-                    break
-                cluster_rgb.eps += 0.05
-                print('RGB: no clusters found, increasing eps to {:.3f} and re-clustering...'.format(cluster_rgb.eps))
-                attempt += 1
-            if num_cluster_rgb == 0:
-                print('WARNING: RGB clustering failed after {} attempts, assigning all samples to cluster 0'.format(max_attempts))
-                pseudo_labels_rgb = np.zeros(len(features_rgb), dtype=np.int32)
-                num_cluster_rgb = 1
-            del rerank_dist_rgb
-            if args.num_instances > 0:
-                min_clusters = max(
-                    1, (args.batch_size + args.num_instances - 1)
-                    // args.num_instances)
-            else:
-                min_clusters = 1
-            if num_cluster_ir < min_clusters:
-                raise RuntimeError(
-                    'IR clustering collapsed: clusters={}, required={}'
-                    .format(num_cluster_ir, min_clusters))
-            if num_cluster_rgb < min_clusters:
-                raise RuntimeError(
-                    'RGB clustering collapsed: clusters={}, required={}'
-                    .format(num_cluster_rgb, min_clusters))
+                # Adaptive clustering for RGB
+                rerank_dist_rgb = compute_jaccard_distance(features_rgb, k1=args.k1, k2=args.k2,search_option=3)
+                cluster_rgb.eps = getattr(cluster_rgb, 'eps', args.eps)
+                attempt = 0
+                while attempt < max_attempts:
+                    rgb_eps_used = cluster_rgb.eps
+                    pseudo_labels_rgb = cluster_rgb.fit_predict(rerank_dist_rgb)
+                    num_cluster_rgb = len(set(pseudo_labels_rgb)) - (1 if -1 in pseudo_labels_rgb else 0)
+                    if num_cluster_rgb > 0:
+                        break
+                    cluster_rgb.eps += 0.05
+                    print('RGB: no clusters found, increasing eps to {:.3f} and re-clustering...'.format(cluster_rgb.eps))
+                    attempt += 1
+                if num_cluster_rgb == 0:
+                    print('WARNING: RGB clustering failed after {} attempts, assigning all samples to cluster 0'.format(max_attempts))
+                    pseudo_labels_rgb = np.zeros(len(features_rgb), dtype=np.int32)
+                    num_cluster_rgb = 1
+                del rerank_dist_rgb
+                if args.num_instances > 0:
+                    min_clusters = max(
+                        1, (args.batch_size + args.num_instances - 1)
+                        // args.num_instances)
+                else:
+                    min_clusters = 1
+                if num_cluster_ir < min_clusters:
+                    raise RuntimeError(
+                        'IR clustering collapsed: clusters={}, required={}'
+                        .format(num_cluster_ir, min_clusters))
+                if num_cluster_rgb < min_clusters:
+                    raise RuntimeError(
+                        'RGB clustering collapsed: clusters={}, required={}'
+                        .format(num_cluster_rgb, min_clusters))
         # generate new dataset and calculate cluster centers
         @torch.no_grad()
         def generate_cluster_features(labels, features):
@@ -1106,71 +1115,74 @@ def main_worker_stage2(args,log_s1_name,log_s2_name,stage1_checkpoint=None):
             print('==> Create pseudo labels for unlabeled ALL data')
             features_all = torch.cat([features_rgb, features_ir], dim=0)
             
-            # Adaptive clustering for IR
-            rerank_dist_ir = compute_jaccard_distance(features_ir, k1=args.k1, k2=args.k2,search_option=3)
-            max_attempts = 10
-            attempt = 0
-            while attempt < max_attempts:
-                ir_eps_used = cluster_ir.eps
-                pseudo_labels_ir = cluster_ir.fit_predict(rerank_dist_ir)
-                num_cluster_ir = len(set(pseudo_labels_ir)) - (1 if -1 in pseudo_labels_ir else 0)
-                if num_cluster_ir > 0:
-                    break
-                cluster_ir.eps += 0.05
-                print('Stage2 IR: no clusters found, increasing eps to {:.3f} and re-clustering...'.format(cluster_ir.eps))
-                attempt += 1
-            if num_cluster_ir == 0:
-                print('WARNING: Stage2 IR clustering failed, assigning all samples to cluster 0')
-                pseudo_labels_ir = np.zeros(len(features_ir), dtype=np.int32)
-                num_cluster_ir = 1
-            del rerank_dist_ir
+            with cluster_lock(
+                    getattr(args, 'cluster_lock_file', ''),
+                    label='Stage 2 epoch {}'.format(epoch)):
+                # Adaptive clustering for IR
+                rerank_dist_ir = compute_jaccard_distance(features_ir, k1=args.k1, k2=args.k2,search_option=3)
+                max_attempts = 10
+                attempt = 0
+                while attempt < max_attempts:
+                    ir_eps_used = cluster_ir.eps
+                    pseudo_labels_ir = cluster_ir.fit_predict(rerank_dist_ir)
+                    num_cluster_ir = len(set(pseudo_labels_ir)) - (1 if -1 in pseudo_labels_ir else 0)
+                    if num_cluster_ir > 0:
+                        break
+                    cluster_ir.eps += 0.05
+                    print('Stage2 IR: no clusters found, increasing eps to {:.3f} and re-clustering...'.format(cluster_ir.eps))
+                    attempt += 1
+                if num_cluster_ir == 0:
+                    print('WARNING: Stage2 IR clustering failed, assigning all samples to cluster 0')
+                    pseudo_labels_ir = np.zeros(len(features_ir), dtype=np.int32)
+                    num_cluster_ir = 1
+                del rerank_dist_ir
 
-            # Adaptive clustering for RGB
-            rerank_dist_rgb = compute_jaccard_distance(features_rgb, k1=args.k1, k2=args.k2,search_option=3)
-            attempt = 0
-            while attempt < max_attempts:
-                rgb_eps_used = cluster_rgb.eps
-                pseudo_labels_rgb = cluster_rgb.fit_predict(rerank_dist_rgb)
-                num_cluster_rgb = len(set(pseudo_labels_rgb)) - (1 if -1 in pseudo_labels_rgb else 0)
-                if num_cluster_rgb > 0:
-                    break
-                cluster_rgb.eps += 0.05
-                print('Stage2 RGB: no clusters found, increasing eps to {:.3f} and re-clustering...'.format(cluster_rgb.eps))
-                attempt += 1
-            if num_cluster_rgb == 0:
-                print('WARNING: Stage2 RGB clustering failed, assigning all samples to cluster 0')
-                pseudo_labels_rgb = np.zeros(len(features_rgb), dtype=np.int32)
-                num_cluster_rgb = 1
-            del rerank_dist_rgb
+                # Adaptive clustering for RGB
+                rerank_dist_rgb = compute_jaccard_distance(features_rgb, k1=args.k1, k2=args.k2,search_option=3)
+                attempt = 0
+                while attempt < max_attempts:
+                    rgb_eps_used = cluster_rgb.eps
+                    pseudo_labels_rgb = cluster_rgb.fit_predict(rerank_dist_rgb)
+                    num_cluster_rgb = len(set(pseudo_labels_rgb)) - (1 if -1 in pseudo_labels_rgb else 0)
+                    if num_cluster_rgb > 0:
+                        break
+                    cluster_rgb.eps += 0.05
+                    print('Stage2 RGB: no clusters found, increasing eps to {:.3f} and re-clustering...'.format(cluster_rgb.eps))
+                    attempt += 1
+                if num_cluster_rgb == 0:
+                    print('WARNING: Stage2 RGB clustering failed, assigning all samples to cluster 0')
+                    pseudo_labels_rgb = np.zeros(len(features_rgb), dtype=np.int32)
+                    num_cluster_rgb = 1
+                del rerank_dist_rgb
 
-            # Adaptive clustering for ALL
-            all_modalities = None
-            if args.dataset_key == 'agreidv2':
-                all_modalities = (
-                    [1] * len(dataset_rgb.train)
-                    + [2] * len(dataset_ir.train))
-            rerank_dist_all = compute_modal_invariant_jaccard_distance(features_all, k1=40, k2=32,
-                                                                       file=sorted(dataset_rgb.train) + sorted(
-                                                                           dataset_ir.train), search_option=3,
-                                                                       modalities=all_modalities)
-            dump_cluster_distance_if_requested(
-                rerank_dist_all, epoch, args.dump_cluster_dist_epoch,
-                args.logs_dir)
-            attempt = 0
-            while attempt < max_attempts:
-                all_eps_used = cluster_all.eps
-                pseudo_labels_all = cluster_all.fit_predict(rerank_dist_all)
-                num_cluster_all = len(set(pseudo_labels_all)) - (1 if -1 in pseudo_labels_all else 0)
-                if num_cluster_all > 0:
-                    break
-                cluster_all.eps += 0.05
-                print('Stage2 ALL: no clusters found, increasing eps to {:.3f} and re-clustering...'.format(cluster_all.eps))
-                attempt += 1
-            if num_cluster_all == 0:
-                print('WARNING: Stage2 ALL clustering failed, assigning all samples to cluster 0')
-                pseudo_labels_all = np.zeros(len(features_all), dtype=np.int32)
-                num_cluster_all = 1
-            del rerank_dist_all
+                # Adaptive clustering for ALL
+                all_modalities = None
+                if args.dataset_key == 'agreidv2':
+                    all_modalities = (
+                        [1] * len(dataset_rgb.train)
+                        + [2] * len(dataset_ir.train))
+                rerank_dist_all = compute_modal_invariant_jaccard_distance(features_all, k1=40, k2=32,
+                                                                           file=sorted(dataset_rgb.train) + sorted(
+                                                                               dataset_ir.train), search_option=3,
+                                                                           modalities=all_modalities)
+                dump_cluster_distance_if_requested(
+                    rerank_dist_all, epoch, args.dump_cluster_dist_epoch,
+                    args.logs_dir)
+                attempt = 0
+                while attempt < max_attempts:
+                    all_eps_used = cluster_all.eps
+                    pseudo_labels_all = cluster_all.fit_predict(rerank_dist_all)
+                    num_cluster_all = len(set(pseudo_labels_all)) - (1 if -1 in pseudo_labels_all else 0)
+                    if num_cluster_all > 0:
+                        break
+                    cluster_all.eps += 0.05
+                    print('Stage2 ALL: no clusters found, increasing eps to {:.3f} and re-clustering...'.format(cluster_all.eps))
+                    attempt += 1
+                if num_cluster_all == 0:
+                    print('WARNING: Stage2 ALL clustering failed, assigning all samples to cluster 0')
+                    pseudo_labels_all = np.zeros(len(features_all), dtype=np.int32)
+                    num_cluster_all = 1
+                del rerank_dist_all
         # generate new dataset and calculate cluster centers
         @torch.no_grad()
         def generate_cluster_features(labels, features):
@@ -1589,6 +1601,10 @@ if __name__ == '__main__':
     parser.add_argument(
         '--dump-cluster-dist-epoch', type=int, default=-1,
         help="zero-based Stage-2 epoch whose ALL distance matrix is saved")
+    parser.add_argument(
+        '--cluster-lock-file', type=str, default='',
+        help=('optional shared flock path; falls back to '
+              'PCLHD_CLUSTER_LOCK and is disabled when both are empty'))
     parser.add_argument('--eps-gap', type=float, default=0.02,
                         help="multi-scale criterion for measuring cluster reliability")
     parser.add_argument('--k1', type=int, default=30,

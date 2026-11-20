@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Controlled AG-ReID experiment launcher.
+"""Controlled AG-ReID baseline, three-domain, and bridge launcher.
 
-Both AG-ReID.v1 and AG-ReID.v2 expose the 2x2 matrix
-(D-AGVA in Stage 1) x (three-domain matching in Stage 2), channel
-augmentation fixed off.  v1 keeps its historical default paths; v2 derives
-its SCHP mask directory, image root and view-score file from ``--data-dir``
-unless they are given explicitly.
+Both AG-ReID.v1 and AG-ReID.v2 retain the original 2x2 D-AGVA/three-domain
+matrix and add opt-in bridge/dynamic_bridge Stage-2 experiments. Channel
+augmentation stays fixed off. v1 keeps its historical default paths; v2
+derives SCHP and view-score paths from ``--data-dir`` when not explicit.
 """
 from __future__ import absolute_import, print_function
 
@@ -29,6 +28,10 @@ EXPERIMENTS = {
     "dynamic": {"dynamic_agva": True, "three_domain": False},
     "three_domain": {"dynamic_agva": False, "three_domain": True},
     "full": {"dynamic_agva": True, "three_domain": True},
+    "bridge": {
+        "dynamic_agva": False, "three_domain": False, "bridge": True},
+    "dynamic_bridge": {
+        "dynamic_agva": True, "three_domain": False, "bridge": True},
 }
 
 DEFAULT_DATA_DIR = "/home/lab338/Jaxon/dataset/AGreid_train"
@@ -52,8 +55,8 @@ DEFAULT_V2_VIEW_SCORE = osp.join(
 def build_parser():
     parser = argparse.ArgumentParser(
         description=(
-            "AG-ReID.v1 2x2 ablation: D-AGVA (Stage 1) x "
-            "three-domain matching (Stage 2), channel augmentation fixed off"
+            "AG-ReID.v1/v2 baseline, D-AGVA, three-domain, and bridge "
+            "experiments; channel augmentation fixed off"
         )
     )
     parser.add_argument(
@@ -143,6 +146,16 @@ def build_parser():
         default="dataset")
     parser.add_argument("--chain-cross-weight", type=float, default=0.25)
     parser.add_argument("--cluster-n-jobs", type=int, default=1)
+    parser.add_argument(
+        "--bridge-score", choices=("ground_knn", "view_csv", "random"),
+        default="ground_knn")
+    parser.add_argument("--bridge-topk", type=int, default=10)
+    parser.add_argument("--bridge-ratio", type=float, default=0.50)
+    parser.add_argument("--log-gt-match-accuracy", action="store_true")
+    parser.add_argument(
+        "--cluster-lock-file", default="",
+        help=("shared clustering flock path; empty uses PCLHD_CLUSTER_LOCK "
+              "or leaves locking disabled"))
 
     parser.add_argument(
         "--debug-nonfinite", action="store_true", default=True)
@@ -243,9 +256,14 @@ def default_log_names(args, spec=None):
     prefix = "agreidv2_dt" if args.dataset_key == "agreidv2" else "agreid_dt"
     stage1 = args.stage1_log_name or (
         "{}_s1_d{}_channel_off_seed{}".format(prefix, d_flag, args.seed))
-    stage2 = args.stage2_log_name or (
-        "{}_{}_d{}_t{}_channel_off_s2_seed{}".format(
-            prefix, args.experiment, d_flag, t_flag, args.seed))
+    if spec.get("bridge", False):
+        stage2 = args.stage2_log_name or (
+            "{}_{}_d{}_b1_channel_off_s2_seed{}".format(
+                prefix, args.experiment, d_flag, args.seed))
+    else:
+        stage2 = args.stage2_log_name or (
+            "{}_{}_d{}_t{}_channel_off_s2_seed{}".format(
+                prefix, args.experiment, d_flag, t_flag, args.seed))
     stage1 = append_resolution_log_suffix(stage1, args)
     stage2 = append_resolution_log_suffix(stage2, args)
     stage1 = _append_eps_suffix(stage1, args.eps)
@@ -296,6 +314,8 @@ def _base_common_args(args, stage1_log_name, stage2_log_name):
         result += ["--dataset-key", args.dataset_key]
     if args.dbscan_backend != "sklearn":
         result += ["--dbscan-backend", args.dbscan_backend]
+    if args.cluster_lock_file:
+        result += ["--cluster-lock-file", _path(args.cluster_lock_file)]
     return result
 
 
@@ -354,6 +374,30 @@ def build_stage2_command(args, checkpoint, stage1_log_name=None,
     stage1_log_name = stage1_log_name or default_s1
     stage2_log_name = stage2_log_name or default_s2
     checkpoint = _path(checkpoint)
+    if spec.get("bridge", False):
+        command = [
+            sys.executable,
+            osp.join(PROJECT_ROOT, "_train_agreid_bridge_engine.py")]
+        command += _base_common_args(args, stage1_log_name, stage2_log_name)
+        command += [
+            "--stage2-only", "--stage1-checkpoint", checkpoint,
+            "--bridge-score", args.bridge_score,
+            "--bridge-topk", str(args.bridge_topk),
+            "--bridge-ratio", str(args.bridge_ratio),
+            "--view-score-file", _path(args.view_score_file),
+            "--view-score-path-mode", args.view_score_path_mode,
+        ]
+        if args.log_gt_match_accuracy:
+            command.append("--log-gt-match-accuracy")
+        command += _resolution_args(args)
+        if args.eps_all is not None:
+            command += ["--eps-all", str(args.eps_all)]
+        if args.dump_cluster_dist_epoch >= 0:
+            command += [
+                "--dump-cluster-dist-epoch",
+                str(args.dump_cluster_dist_epoch)]
+        return command
+
     if not spec["three_domain"]:
         command = [
             sys.executable, osp.join(PROJECT_ROOT, "_train_agreid_engine.py")]
@@ -417,6 +461,8 @@ def build_stage2_command(args, checkpoint, stage1_log_name=None,
         command += ["--dataset-key", args.dataset_key]
     if args.allow_log_overwrite:
         command.append("--allow-log-overwrite")
+    if args.cluster_lock_file:
+        command += ["--cluster-lock-file", _path(args.cluster_lock_file)]
     if args.eps_all is not None:
         command += ["--eps-all", str(args.eps_all)]
     if args.dbscan_backend != "sklearn":
@@ -455,6 +501,10 @@ def validate_args(args):
         raise ValueError("invalid D-AGVA displacement range")
     if args.cluster_n_jobs < 1:
         raise ValueError("--cluster-n-jobs must be at least 1")
+    if args.bridge_topk < 1:
+        raise ValueError("--bridge-topk must be at least 1")
+    if not 0.0 < args.bridge_ratio <= 1.0:
+        raise ValueError("--bridge-ratio must be in (0, 1]")
     if (args.dump_cluster_dist_epoch < -1
             or args.dump_cluster_dist_epoch >= args.epochs):
         raise ValueError(
@@ -479,7 +529,9 @@ def validate_args(args):
         raise FileNotFoundError("Stage 1 checkpoint not found: {}".format(
             args.stage1_checkpoint))
     runs_stage2 = args.run_mode in ("full", "stage2")
-    if runs_stage2 and spec["three_domain"] and not osp.isfile(
+    needs_view_scores = (spec["three_domain"] or (
+        spec.get("bridge", False) and args.bridge_score == "view_csv"))
+    if runs_stage2 and needs_view_scores and not osp.isfile(
             _path(args.view_score_file)):
         raise FileNotFoundError("view-score file not found: {}".format(
             args.view_score_file))
@@ -501,6 +553,8 @@ def _print_config(args, spec, stage1_log_name, stage2_log_name):
     print("D-AGVA (Stage 1 only): {}".format(spec["dynamic_agva"]))
     print("Three-domain matching (Stage 2): {}".format(
         spec["three_domain"]))
+    print("Bridge matching (Stage 2): {}".format(
+        spec.get("bridge", False)))
     print("ChannelAdapGray: False (Stage 1 and Stage 2)")
     print("ChannelExchange/Gray: False (Stage 1 and Stage 2)")
     print("ChannelRandomErasing: True (spatial augmentation)")
@@ -525,6 +579,19 @@ def _print_config(args, spec, stage1_log_name, stage2_log_name):
     if spec["three_domain"]:
         print("View score file: {}".format(_path(args.view_score_file)))
         print("View near ratio (per camera): {}".format(args.view_near_ratio))
+    if spec.get("bridge", False):
+        print("Bridge score: {}".format(args.bridge_score))
+        print("Bridge top-k: {}".format(args.bridge_topk))
+        print("Bridge ratio (within each cluster): {}".format(
+            args.bridge_ratio))
+        print("Bridge GT match diagnostics: {}".format(
+            args.log_gt_match_accuracy))
+        if args.bridge_score == "view_csv":
+            print("Bridge view score file: {}".format(
+                _path(args.view_score_file)))
+    print("Cluster lock: {}".format(
+        _path(args.cluster_lock_file) if args.cluster_lock_file else
+        os.environ.get("PCLHD_CLUSTER_LOCK", "disabled")))
     print("Checkpoint policy: {}".format(args.checkpoint_policy))
     print("Stage 1 log: {}".format(stage1_log_name))
     print("Stage 2 log: {}".format(stage2_log_name))

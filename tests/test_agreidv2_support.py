@@ -93,7 +93,9 @@ class AGReIDV2SupportTests(unittest.TestCase):
         self.assertTrue(v2_s1.startswith("agreidv2_dt_"))
 
     def test_v2_accepts_all_experiments_in_dry_run(self):
-        for experiment in ("baseline", "dynamic", "three_domain", "full"):
+        for experiment in (
+                "baseline", "dynamic", "three_domain", "full",
+                "bridge", "dynamic_bridge"):
             args = parse(
                 "--dataset-key", "agreidv2", "--experiment", experiment,
                 "--data-dir", "/data/AG-ReID.v2")
@@ -103,11 +105,11 @@ class AGReIDV2SupportTests(unittest.TestCase):
         args = parse("--dataset-key", "agreidv2", "--experiment", "full",
                      "--data-dir", "/data/AG-ReID.v2/")
         runner.resolve_dataset_paths(args)
+        outer = runner._path("/data/AG-ReID.v2")
         self.assertEqual(args.dynamic_agva_mask_dir,
-                         osp.join("/data/AG-ReID.v2_SCHP", "train_all"))
+                         osp.join(outer + "_SCHP", "train_all"))
         self.assertEqual(args.dynamic_agva_image_root,
-                         osp.join("/data/AG-ReID.v2", "AG-ReID.v2",
-                                  "train_all"))
+                         osp.join(outer, "AG-ReID.v2", "train_all"))
         self.assertEqual(args.view_score_file, runner.DEFAULT_V2_VIEW_SCORE)
 
     def test_v1_default_paths_are_unchanged(self):
@@ -139,9 +141,10 @@ class AGReIDV2SupportTests(unittest.TestCase):
             "agreidv2_dt_dynamic_d1_t0_channel_off_s2_seed1_eps0.6")
         command = runner.build_stage1_command(args)
         self.assertIn("--use-dynamic-agva", command)
+        outer = runner._path("/data/AG-ReID.v2")
         self.assertEqual(
             command[command.index("--dynamic-agva-image-root") + 1],
-            osp.join("/data/AG-ReID.v2", "AG-ReID.v2", "train_all"))
+            osp.join(outer, "AG-ReID.v2", "train_all"))
         self.assertEqual(command[command.index("--dataset") + 1],
                          "agreidv2_ir")
         self.assertEqual(command[command.index("--dataset-key") + 1],

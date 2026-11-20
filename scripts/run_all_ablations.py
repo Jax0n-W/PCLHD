@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Run the controlled AG-ReID.v1 2x2 D-AGVA/three-domain ablation.
+"""Run controlled AG-ReID.v1/v2 baseline, three-domain, and bridge jobs.
 
 Only two Stage-1 jobs are trained (D=0 and D=1); their best checkpoints are
-then reused by the four Stage-2 branches.
+then reused by all selected Stage-2 experiments. The default selection remains
+the original four experiments.
 """
 from __future__ import print_function
 
@@ -21,8 +22,9 @@ if ROOT not in sys.path:
 from experiment_runner import (
     DEFAULT_EPS, dataset_default_paths, eps_log_suffix)
 
-ALL_EXPERIMENTS = ("baseline", "dynamic", "three_domain", "full")
-DYNAMIC_EXPERIMENTS = {"dynamic", "full"}
+DEFAULT_EXPERIMENTS = ("baseline", "dynamic", "three_domain", "full")
+ALL_EXPERIMENTS = DEFAULT_EXPERIMENTS + ("bridge", "dynamic_bridge")
+DYNAMIC_EXPERIMENTS = {"dynamic", "full", "dynamic_bridge"}
 
 
 def build_parser():
@@ -34,7 +36,7 @@ def build_parser():
         default="agreid")
     parser.add_argument(
         "--experiments", nargs="+", choices=ALL_EXPERIMENTS,
-        default=list(ALL_EXPERIMENTS))
+        default=list(DEFAULT_EXPERIMENTS))
     parser.add_argument(
         "--data-dir", default="/home/lab338/Jaxon/dataset/AGreid_train")
     parser.add_argument(
@@ -66,6 +68,16 @@ def build_parser():
     parser.add_argument("--print-freq", type=int, default=50)
     parser.add_argument("--dynamic-agva-strict-masks", action="store_true")
     parser.add_argument("--allow-log-overwrite", action="store_true")
+    parser.add_argument(
+        "--bridge-score", choices=("ground_knn", "view_csv", "random"),
+        default="ground_knn")
+    parser.add_argument("--bridge-topk", type=int, default=10)
+    parser.add_argument("--bridge-ratio", type=float, default=0.50)
+    parser.add_argument("--log-gt-match-accuracy", action="store_true")
+    parser.add_argument(
+        "--cluster-lock-file", default="",
+        help=("shared lock path for all selected experiments; empty uses "
+              "PCLHD_CLUSTER_LOCK or disables locking"))
     parser.add_argument("--rerun-stage1", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser
@@ -108,6 +120,10 @@ def common_args(args):
         result += ["--eps", str(args.eps)]
     if args.dbscan_backend != "sklearn":
         result += ["--dbscan-backend", args.dbscan_backend]
+    if args.cluster_lock_file:
+        result += [
+            "--cluster-lock-file",
+            osp.abspath(osp.expanduser(args.cluster_lock_file))]
     return result
 
 
@@ -161,6 +177,14 @@ def main(argv=None):
             "--run-mode", "stage2",
             "--stage1-checkpoint", checkpoint,
         ] + shared
+        if experiment in ("bridge", "dynamic_bridge"):
+            command += [
+                "--bridge-score", args.bridge_score,
+                "--bridge-topk", str(args.bridge_topk),
+                "--bridge-ratio", str(args.bridge_ratio),
+            ]
+            if args.log_gt_match_accuracy:
+                command.append("--log-gt-match-accuracy")
         if args.eps_all is not None:
             command += ["--eps-all", str(args.eps_all)]
         if args.dump_cluster_dist_epoch >= 0:

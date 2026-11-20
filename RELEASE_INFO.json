@@ -1,6 +1,6 @@
 {
-  "release_name": "PCLHD_AGReID_DT_release_20261110",
-  "dataset": "AG-ReID.v1 plus AG-ReID.v2 (2x2 D-AGVA x three-domain ablation)",
+  "release_name": "PCLHD_AGReID_bridge_release_20261120",
+  "dataset": "AG-ReID.v1 plus AG-ReID.v2 (baseline, three-domain, and bridge matching)",
   "identity_rule": "concatenate P, T, and A filename fields",
   "expected_train_identities": 199,
   "expected_test_identities": 189,
@@ -14,7 +14,9 @@
         "baseline",
         "dynamic",
         "three_domain",
-        "full"
+        "full",
+        "bridge",
+        "dynamic_bridge"
       ]
     },
     "agreidv2": {
@@ -24,7 +26,9 @@
         "baseline",
         "dynamic",
         "three_domain",
-        "full"
+        "full",
+        "bridge",
+        "dynamic_bridge"
       ],
       "train_images": 51530,
       "train_identities": 807,
@@ -91,7 +95,7 @@
       }
     }
   },
-  "purpose": "2x2 ablation of Stage-1 D-AGVA and Stage-2 three-domain matching",
+  "purpose": "Controlled Stage-1 D-AGVA experiments with baseline, three-domain, and cluster-selected bridge Stage-2 matching",
   "experiments": {
     "baseline": {
       "dynamic_agva": false,
@@ -108,6 +112,16 @@
     "full": {
       "dynamic_agva": true,
       "three_domain": true
+    },
+    "bridge": {
+      "dynamic_agva": false,
+      "three_domain": false,
+      "bridge_matching": true
+    },
+    "dynamic_bridge": {
+      "dynamic_agva": true,
+      "three_domain": false,
+      "bridge_matching": true
     }
   },
   "fixed_settings": {
@@ -128,7 +142,13 @@
     "nondefault_eps_log_suffix": true,
     "different_eps_all_stage2_log_suffix": true,
     "default_stage2_initialization": "stage1_model_best",
-    "default_checkpoint_policy": "best"
+    "default_checkpoint_policy": "best",
+    "bridge_score_default": "ground_knn",
+    "bridge_topk_default": 10,
+    "bridge_ratio_default": 0.5,
+    "bridge_gt_match_accuracy_default": false,
+    "cluster_lock_default": "disabled",
+    "cluster_lock_environment": "PCLHD_CLUSTER_LOCK"
   },
   "training_artifacts_included": false,
   "dataset_included": false

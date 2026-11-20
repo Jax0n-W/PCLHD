@@ -16,6 +16,7 @@ REQUIRED = (
     "experiment_runner.py",
     "_train_agreid_engine.py",
     "_train_agreid_three_domain_engine.py",
+    "_train_agreid_bridge_engine.py",
     "scripts/run_all_ablations.py",
     "scripts/test_all_checkpoints.py",
     "FAST_DBSCAN_NOTES.md",
@@ -23,6 +24,8 @@ REQUIRED = (
     "clustercontrast/datasets/agreidv2_rgb.py",
     "clustercontrast/utils/clustering.py",
     "clustercontrast/utils/fast_dbscan.py",
+    "clustercontrast/utils/cluster_lock.py",
+    "clustercontrast/bridge_matching.py",
     "examples/PCLHD_AGReIDv2_test.py",
     "tools/preflight_agreidv2.py",
     "tests/test_release_configuration.py",
@@ -30,8 +33,12 @@ REQUIRED = (
     "tests/test_agreidv2_support.py",
     "tests/test_clustering_eps.py",
     "tests/test_fast_dbscan.py",
+    "tests/test_bridge_matching.py",
+    "tests/test_bridge_runner.py",
+    "tests/test_cluster_lock.py",
     "tools/verify_fast_dbscan.py",
     "V2_MODULES.md",
+    "BRIDGE_MATCHING.md",
     "scripts/prepare_agreidv2_view_scores.sh",
     "tests/test_view_domain_v2.py",
     "tests/test_dynamic_agva_coverage.py",
@@ -55,7 +62,8 @@ def main():
 
     for filename in (
             "_train_agreid_engine.py",
-            "_train_agreid_three_domain_engine.py"):
+            "_train_agreid_three_domain_engine.py",
+            "_train_agreid_bridge_engine.py"):
         path = osp.join(ROOT, filename)
         with open(path, "r", encoding="utf-8") as handle:
             source = handle.read()
@@ -117,15 +125,16 @@ def main():
         path = osp.join(ROOT, *relative.replace("\\", "/").split("/"))
         digest = hashlib.sha256()
         with open(path, "rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
+            # The manifest records repository (LF) bytes.  Normalize checkout
+            # line endings so verification is identical on Linux and Windows.
+            digest.update(handle.read().replace(b"\r\n", b"\n"))
         if digest.hexdigest() != expected:
             ok = fail("SHA256 mismatch: {}".format(relative)) and ok
 
     if ok:
         print("RELEASE_VERIFICATION_PASSED")
         print("Channel conversion augmentation: OFF in both stages")
-        print("Controlled experiments: baseline, dynamic, three_domain, full")
+        print("Controlled experiments: baseline, dynamic, three_domain, full, bridge, dynamic_bridge")
         return 0
     return 1
 

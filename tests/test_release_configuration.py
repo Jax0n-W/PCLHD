@@ -17,9 +17,10 @@ def parse(*items):
 
 
 class ReleaseConfigurationTests(unittest.TestCase):
-    def test_matrix_is_exactly_two_by_two(self):
+    def test_original_matrix_and_bridge_experiments(self):
         self.assertEqual(set(runner.EXPERIMENTS), {
-            "baseline", "dynamic", "three_domain", "full"})
+            "baseline", "dynamic", "three_domain", "full",
+            "bridge", "dynamic_bridge"})
         self.assertEqual(runner.EXPERIMENTS["baseline"], {
             "dynamic_agva": False, "three_domain": False})
         self.assertEqual(runner.EXPERIMENTS["dynamic"], {
@@ -28,6 +29,12 @@ class ReleaseConfigurationTests(unittest.TestCase):
             "dynamic_agva": False, "three_domain": True})
         self.assertEqual(runner.EXPERIMENTS["full"], {
             "dynamic_agva": True, "three_domain": True})
+        self.assertEqual(runner.EXPERIMENTS["bridge"], {
+            "dynamic_agva": False, "three_domain": False,
+            "bridge": True})
+        self.assertEqual(runner.EXPERIMENTS["dynamic_bridge"], {
+            "dynamic_agva": True, "three_domain": False,
+            "bridge": True})
 
     def test_channel_mode_is_fixed_off_in_all_commands(self):
         for name in runner.EXPERIMENTS:
@@ -60,6 +67,16 @@ class ReleaseConfigurationTests(unittest.TestCase):
                 stage2[1].endswith("_train_agreid_three_domain_engine.py"),
                 spec["three_domain"])
 
+    def test_bridge_is_stage2_only(self):
+        for name in ("bridge", "dynamic_bridge"):
+            args = parse("--experiment", name)
+            stage1 = runner.build_stage1_command(args)
+            stage2 = runner.build_stage2_command(
+                args, "/tmp/stage1.pth.tar")
+            self.assertTrue(stage1[1].endswith("_train_agreid_engine.py"))
+            self.assertTrue(
+                stage2[1].endswith("_train_agreid_bridge_engine.py"))
+
     def test_original_stage2_is_cmhard_without_ema_loss(self):
         for name in ("baseline", "dynamic"):
             args = parse("--experiment", name)
@@ -88,7 +105,8 @@ class ReleaseConfigurationTests(unittest.TestCase):
     def test_training_engines_have_no_channel_conversion_calls(self):
         for filename in (
                 "_train_agreid_engine.py",
-                "_train_agreid_three_domain_engine.py"):
+                "_train_agreid_three_domain_engine.py",
+                "_train_agreid_bridge_engine.py"):
             with open(osp.join(ROOT, filename), "r", encoding="utf-8") as f:
                 source = f.read()
             self.assertNotIn("ChannelAdapGray(", source)

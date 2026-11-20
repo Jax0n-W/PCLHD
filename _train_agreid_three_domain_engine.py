@@ -50,6 +50,8 @@ from clustercontrast.utils.clustering import \
     resolve_eps_all
 from clustercontrast.utils.fast_dbscan import \
     dump_cluster_distance_if_requested
+from clustercontrast.utils.cluster_lock import (
+    cluster_lock, resolve_cluster_lock_file)
 from clustercontrast.utils.logging import Logger
 from clustercontrast.utils.serialization import save_checkpoint
 from clustercontrast.viewbridge import (VIEW_PATH_MODES, load_view_score_map,
@@ -519,43 +521,46 @@ def main_worker_stage2(args):
             features_near_ema = features_aerial_ema.index_select(
                 0, epoch_near_indexes)
 
-            distance_far = baseline.compute_jaccard_distance(
-                features_far, k1=args.k1, k2=args.k2, search_option=3)
-            labels_far, num_far = _adaptive_cluster(
-                cluster_far, distance_far, "A_far")
-            del distance_far
+            with cluster_lock(
+                    getattr(args, "cluster_lock_file", ""),
+                    label="Three-domain Stage 2 epoch {}".format(epoch)):
+                distance_far = baseline.compute_jaccard_distance(
+                    features_far, k1=args.k1, k2=args.k2, search_option=3)
+                labels_far, num_far = _adaptive_cluster(
+                    cluster_far, distance_far, "A_far")
+                del distance_far
 
-            distance_near = baseline.compute_jaccard_distance(
-                features_near, k1=args.k1, k2=args.k2, search_option=3)
-            labels_near, num_near = _adaptive_cluster(
-                cluster_near, distance_near, "A_near")
-            del distance_near
+                distance_near = baseline.compute_jaccard_distance(
+                    features_near, k1=args.k1, k2=args.k2, search_option=3)
+                labels_near, num_near = _adaptive_cluster(
+                    cluster_near, distance_near, "A_near")
+                del distance_near
 
-            distance_ground = baseline.compute_jaccard_distance(
-                features_ground, k1=args.k1, k2=args.k2, search_option=3)
-            labels_ground, num_ground = _adaptive_cluster(
-                cluster_ground, distance_ground, "Ground")
-            del distance_ground
+                distance_ground = baseline.compute_jaccard_distance(
+                    features_ground, k1=args.k1, k2=args.k2, search_option=3)
+                labels_ground, num_ground = _adaptive_cluster(
+                    cluster_ground, distance_ground, "Ground")
+                del distance_ground
 
-            all_train = ground_train + aerial_train
-            features_all = torch.cat(
-                (features_ground, features_aerial), dim=0)
-            # v2 paths carry no aerial_modify/ground_modify marker, so the
-            # modality of every row must be passed explicitly (as in the
-            # baseline engine); v1 keeps its historical path-based inference.
-            all_modalities = None
-            if args.dataset_key == "agreidv2":
-                all_modalities = ([1] * len(ground_train)
-                                  + [2] * len(aerial_train))
-            distance_all = baseline.compute_modal_invariant_jaccard_distance(
-                features_all, k1=40, k2=32, file=all_train,
-                search_option=3, modalities=all_modalities)
-            dump_cluster_distance_if_requested(
-                distance_all, epoch, args.dump_cluster_dist_epoch,
-                args.logs_dir)
-            labels_all, num_all = _adaptive_cluster(
-                cluster_all, distance_all, "ALL")
-            del distance_all
+                all_train = ground_train + aerial_train
+                features_all = torch.cat(
+                    (features_ground, features_aerial), dim=0)
+                # v2 paths carry no aerial_modify/ground_modify marker, so the
+                # modality of every row must be passed explicitly (as in the
+                # baseline engine); v1 keeps its historical path-based inference.
+                all_modalities = None
+                if args.dataset_key == "agreidv2":
+                    all_modalities = ([1] * len(ground_train)
+                                      + [2] * len(aerial_train))
+                distance_all = baseline.compute_modal_invariant_jaccard_distance(
+                    features_all, k1=40, k2=32, file=all_train,
+                    search_option=3, modalities=all_modalities)
+                dump_cluster_distance_if_requested(
+                    distance_all, epoch, args.dump_cluster_dist_epoch,
+                    args.logs_dir)
+                labels_all, num_all = _adaptive_cluster(
+                    cluster_all, distance_all, "ALL")
+                del distance_all
         memory_far, centers_far, num_far = _create_hard_memory(
             model, args, labels_far, features_far, features_far_ema)
         memory_near, centers_near, num_near = _create_hard_memory(
@@ -746,6 +751,10 @@ def build_parser():
     parser.add_argument(
         "--dump-cluster-dist-epoch", type=int, default=-1,
         help="zero-based Stage-2 epoch whose ALL distance matrix is saved")
+    parser.add_argument(
+        "--cluster-lock-file", type=str, default="",
+        help=("optional shared flock path; falls back to "
+              "PCLHD_CLUSTER_LOCK and is disabled when both are empty"))
     parser.add_argument("--eps-gap", type=float, default=0.02)
     parser.add_argument("--k1", type=int, default=30)
     parser.add_argument("--k2", type=int, default=6)
@@ -823,6 +832,8 @@ def build_parser():
 def main(argv=None):
     args = build_parser().parse_args(
         sys.argv[1:] if argv is None else argv)
+    args.cluster_lock_file = resolve_cluster_lock_file(
+        args.cluster_lock_file)
     validate_resolution_augment_args(args)
     args.eps_all = resolve_eps_all(args)
     args.stage2_log_name = append_resolution_log_suffix(
@@ -845,6 +856,8 @@ def main(argv=None):
     print("Low-memory clustering: sequential matrices, n_jobs={}".format(
         args.cluster_n_jobs))
     print("DBSCAN backend: {}".format(args.dbscan_backend))
+    print("Cluster lock: {}".format(
+        args.cluster_lock_file if args.cluster_lock_file else "disabled"))
     print("Stage 2 AGVA/offline replacement: disabled")
     print("Stage 1: skipped; explicit checkpoint required")
     print("Stage 2 log name: {}".format(args.stage2_log_name))
