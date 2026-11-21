@@ -22,8 +22,13 @@ from agreid_identity import (
     AGREID_TEST_IDENTITIES, DATASET_SPECS, parse_agreid_name,
     parse_agreidv2_manifest)
 from clustercontrast.models.cm import ClusterMemory
+from clustercontrast.models.cm_masked import MaskedClusterMemory
 from clustercontrast.trainers import ClusterContrastTrainer_DCL, ClusterContrastTrainer_PCLMP
 from clustercontrast.trainers_no_ema_loss import ClusterContrastTrainer_PCLMP_NoEMALoss
+from clustercontrast.trainers_agva_mask import (
+    ClusterContrastTrainer_DCL_AGVAMask,
+    ClusterContrastTrainer_PCLMP_NoEMALoss_AGVAMask,
+)
 from clustercontrast.confident_alignment import build_confident_cluster_matches
 from clustercontrast.trainers_confident_alignment import (
     ClusterContrastTrainer_PCLMP_ConfidentAlignment,
@@ -36,6 +41,11 @@ from clustercontrast.utils.data.dynamic_agva import (
     add_dynamic_agva_arguments, get_dynamic_agva_process,
     report_dynamic_agva_mask_coverage,
     print_dynamic_agva_config, validate_dynamic_agva_args,
+)
+from clustercontrast.utils.data.agva_flag import (
+    add_agva_flag_arguments, agva_flag_loader_enabled,
+    get_train_loader_ir_flag, prepare_ground_mixture,
+    validate_agva_flag_args,
 )
 from clustercontrast.utils.data.resolution_augment import (
     add_resolution_augment_arguments, append_resolution_log_suffix,
@@ -603,6 +613,12 @@ def main():
     args.stage2_log_name = append_stage2_eps_log_suffix(
         args.stage2_log_name, args.eps, args.eps_all)
     validate_dynamic_agva_args(args)
+    validate_agva_flag_args(args)
+    if (agva_flag_loader_enabled(args)
+            and getattr(args, 'use_confident_alignment_stage2', False)):
+        parser.error(
+            'D-AGVA memory masking/ground-mixture is not supported by the '
+            'confident-alignment trainer')
     print_dynamic_agva_config(args)
     print('DBSCAN backend: {}'.format(args.dbscan_backend))
     print('Cluster lock: {}'.format(
@@ -675,6 +691,9 @@ def main_worker_stage1(args,log_s1_name):
     if getattr(args, 'use_dynamic_agva', False):
         report_dynamic_agva_mask_coverage(
             args, dataset_ir.train, dataset_ir.images_dir)
+    prepare_ground_mixture(
+        args, dataset_ir.train, dataset_rgb.train,
+        dataset_ir.images_dir, dataset_rgb.images_dir)
     resolution_augmenters = build_resolution_augmenters(
         args, dataset_ir.train, dataset_rgb.train, stage=1,
         aerial_root=dataset_ir.images_dir,
@@ -692,8 +711,14 @@ def main_worker_stage1(args,log_s1_name):
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=0.1)
 
     # Trainer
-    trainer = ClusterContrastTrainer_DCL(
-        model, debug_nonfinite=args.debug_nonfinite)
+    use_agva_flags = agva_flag_loader_enabled(args)
+    if use_agva_flags:
+        trainer = ClusterContrastTrainer_DCL_AGVAMask(
+            model, debug_nonfinite=args.debug_nonfinite,
+            mask_memory_updates=args.dynamic_agva_no_memory_update)
+    else:
+        trainer = ClusterContrastTrainer_DCL(
+            model, debug_nonfinite=args.debug_nonfinite)
 
     for epoch in range(args.epochs):
         reset_resolution_stats(resolution_augmenters)
@@ -816,10 +841,13 @@ def main_worker_stage1(args,log_s1_name):
         check_feature_rows_finite(
             'cluster_centers_rgb', cluster_features_rgb, None, epoch,
             getattr(args, 'debug_nonfinite', False))
-        memory_ir = ClusterMemory(model.module.num_features, num_cluster_ir, temp=args.temp,
+        memory_class = (MaskedClusterMemory
+                        if args.dynamic_agva_no_memory_update
+                        else ClusterMemory)
+        memory_ir = memory_class(model.module.num_features, num_cluster_ir, temp=args.temp,
                                   momentum=args.momentum, mode=args.memorybank, smooth=args.smooth,
                                   num_instances=args.num_instances).cuda()
-        memory_rgb = ClusterMemory(model.module.num_features, num_cluster_rgb, temp=args.temp,
+        memory_rgb = memory_class(model.module.num_features, num_cluster_rgb, temp=args.temp,
                                    momentum=args.momentum, mode=args.memorybank, smooth=args.smooth,
                                    num_instances=args.num_instances).cuda()
         if args.memorybank == 'CM':
@@ -914,7 +942,9 @@ def main_worker_stage1(args,log_s1_name):
 
         transform_thermal = build_ir_train_transform(args, height, width, normalizer)
 
-        train_loader_ir = get_train_loader_ir(args, dataset_ir, args.height, args.width,
+        ir_loader_builder = (get_train_loader_ir_flag
+                             if use_agva_flags else get_train_loader_ir)
+        train_loader_ir = ir_loader_builder(args, dataset_ir, args.height, args.width,
                                         args.batch_size, args.workers, args.num_instances, iters,
                                         trainset=pseudo_labeled_dataset_ir, no_cam=args.no_cam,train_transformer=transform_thermal,
                                         resolution_process=resolution_augmenters['aerial'])
@@ -1028,6 +1058,9 @@ def main_worker_stage2(args,log_s1_name,log_s2_name,stage1_checkpoint=None):
     ir_name, rgb_name = get_training_dataset_names(args.dataset_key)
     dataset_ir = get_data(ir_name, args.data_dir,trial=trial)
     dataset_rgb = get_data(rgb_name, args.data_dir,trial=trial)
+    prepare_ground_mixture(
+        args, dataset_ir.train, dataset_rgb.train,
+        dataset_ir.images_dir, dataset_rgb.images_dir)
     resolution_augmenters = build_resolution_augmenters(
         args, dataset_ir.train, dataset_rgb.train, stage=2,
         aerial_root=dataset_ir.images_dir,
@@ -1058,7 +1091,20 @@ def main_worker_stage2(args,log_s1_name,log_s2_name,stage1_checkpoint=None):
     use_confident_alignment = getattr(
         args, 'use_confident_alignment_stage2', False)
     no_ema_loss = getattr(args, 'no_ema_loss', False)
-    if use_confident_alignment:
+    use_agva_flags = agva_flag_loader_enabled(args)
+    if use_agva_flags and use_confident_alignment:
+        raise ValueError(
+            'D-AGVA memory masking/ground-mixture is not supported by the '
+            'confident-alignment trainer')
+    if use_agva_flags:
+        if not no_ema_loss:
+            raise ValueError(
+                'D-AGVA memory masking requires the dynamic experiment '
+                'Stage 2 trainer (--no-ema-loss)')
+        trainer = ClusterContrastTrainer_PCLMP_NoEMALoss_AGVAMask(
+            model, model_ema,
+            mask_memory_updates=args.dynamic_agva_no_memory_update)
+    elif use_confident_alignment:
         trainer = ClusterContrastTrainer_PCLMP_ConfidentAlignment(
             model, model_ema,
             alignment_weight=args.alignment_weight,
@@ -1254,13 +1300,16 @@ def main_worker_stage2(args,log_s1_name,log_s2_name,stage1_checkpoint=None):
                                                                          features_all,
                                                                          sorted(dataset_rgb.train) + sorted(
                                                                              dataset_ir.train))
-        memory_ir = ClusterMemory(model.module.num_features, num_cluster_ir, temp=args.temp,
+        memory_class = (MaskedClusterMemory
+                        if args.dynamic_agva_no_memory_update
+                        else ClusterMemory)
+        memory_ir = memory_class(model.module.num_features, num_cluster_ir, temp=args.temp,
                                   momentum=args.momentum, mode=args.memorybank, smooth=args.smooth,
                                   num_instances=args.num_instances).cuda()
-        memory_rgb = ClusterMemory(model.module.num_features, num_cluster_rgb, temp=args.temp,
+        memory_rgb = memory_class(model.module.num_features, num_cluster_rgb, temp=args.temp,
                                    momentum=args.momentum, mode=args.memorybank, smooth=args.smooth,
                                    num_instances=args.num_instances).cuda()
-        memory_all = ClusterMemory(model.module.num_features, num_cluster_all, temp=args.temp,
+        memory_all = memory_class(model.module.num_features, num_cluster_all, temp=args.temp,
                                     momentum=args.momentum, mode='CMhybrid', smooth=args.smooth,
                                    num_instances=args.num_instances).cuda()
         if args.memorybank == 'CM':
@@ -1464,7 +1513,9 @@ def main_worker_stage2(args,log_s1_name,log_s2_name,stage1_checkpoint=None):
 
         transform_thermal = build_ir_train_transform(args, height, width, normalizer)
 
-        train_loader_ir = get_train_loader_ir(args, dataset_ir, args.height, args.width,
+        ir_loader_builder = (get_train_loader_ir_flag
+                             if use_agva_flags else get_train_loader_ir)
+        train_loader_ir = ir_loader_builder(args, dataset_ir, args.height, args.width,
                                         args.batch_size, args.workers, args.num_instances, iters,
                                         trainset=pseudo_labeled_dataset_ir, no_cam=args.no_cam,train_transformer=transform_thermal,
                                         resolution_process=resolution_augmenters['aerial'])
@@ -1473,7 +1524,7 @@ def main_worker_stage2(args,log_s1_name,log_s2_name,stage1_checkpoint=None):
                                         args.batch_size, args.workers, args.num_instances, iters,
                                         trainset=pseudo_labeled_dataset_rgb, no_cam=args.no_cam,train_transformer=train_transformer_rgb,train_transformer1=train_transformer_rgb1,
                                         resolution_process=resolution_augmenters['ground'])
-        train_loader_all_ir = get_train_loader_ir(args, dataset_ir, args.height, args.width,
+        train_loader_all_ir = ir_loader_builder(args, dataset_ir, args.height, args.width,
                                                   args.batch_size, args.workers, args.num_instances, iters,
                                                   trainset=pseudo_labeled_dataset_all_ir, no_cam=args.no_cam,
                                                   train_transformer=transform_thermal,
@@ -1683,6 +1734,7 @@ if __name__ == '__main__':
         default_mask_dir='/home/lab338/Jaxon/dataset/AGreid_train_SCHP/aerial_modify/1/bounding_box_train',
         default_image_root='/home/lab338/Jaxon/dataset/AGreid_train',
     )
+    add_agva_flag_arguments(parser)
     add_resolution_augment_arguments(parser)
 
     main()

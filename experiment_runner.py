@@ -58,6 +58,26 @@ DEFAULT_V2_VIEW_SCORE = osp.join(
 )
 
 
+class _AGVAV2Store(argparse.Action):
+    """Remember explicit AGVA-v2 options so non-dynamic runs can reject them."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        setattr(namespace, "_agva_v2_requested", True)
+
+
+class _AGVAV2StoreTrue(argparse.Action):
+    def __init__(self, option_strings, dest, default=False, required=False,
+                 help=None):
+        super(_AGVAV2StoreTrue, self).__init__(
+            option_strings=option_strings, dest=dest, nargs=0,
+            default=default, required=required, help=help)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, True)
+        setattr(namespace, "_agva_v2_requested", True)
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         description=(
@@ -133,6 +153,19 @@ def build_parser():
     parser.add_argument(
         "--dynamic-agva-max-displacement", type=float, default=0.040)
     parser.add_argument("--dynamic-agva-strict-masks", action="store_true")
+    parser.add_argument(
+        "--dynamic-agva-no-memory-update", action=_AGVAV2StoreTrue,
+        help="augmented aerial samples do not update cluster memories")
+    parser.add_argument(
+        "--dynamic-agva-target", choices=("fixed", "ground-mixture"),
+        default="fixed", action=_AGVAV2Store)
+    parser.add_argument(
+        "--dynamic-agva-need-scale", type=float, default=0.20,
+        action=_AGVAV2Store)
+    parser.add_argument(
+        "--dynamic-agva-ground-mask-dir", default="",
+        action=_AGVAV2Store)
+    parser.set_defaults(_agva_v2_requested=False)
 
     parser.add_argument(
         "--view-score-file", default="",
@@ -212,6 +245,10 @@ def resolve_dataset_paths(args):
         args.dynamic_agva_image_root = defaults["image_root"]
     if not args.view_score_file:
         args.view_score_file = defaults["view_score"]
+    if (args.dataset_key == "agreidv2"
+            and args.dynamic_agva_target == "ground-mixture"
+            and not args.dynamic_agva_ground_mask_dir):
+        args.dynamic_agva_ground_mask_dir = args.dynamic_agva_mask_dir
     return args
 
 
@@ -269,24 +306,28 @@ def default_log_names(args, spec=None):
     d_flag = int(spec["dynamic_agva"])
     t_flag = int(spec["three_domain"])
     prefix = "agreidv2_dt" if args.dataset_key == "agreidv2" else "agreid_dt"
+    agva_tag = agva_v2_log_tag(args)
     stage1 = args.stage1_log_name or (
-        "{}_s1_d{}_channel_off_seed{}".format(prefix, d_flag, args.seed))
+        "{}_s1_d{}{}_channel_off_seed{}".format(
+            prefix, d_flag, agva_tag, args.seed))
     if spec.get("confident_cross", False):
         stage2 = args.stage2_log_name or (
-            "{}_{}_d{}_cr{}-{}r{}_channel_off_s2_seed{}".format(
-                prefix, args.experiment, d_flag,
+            "{}_{}_d{}{}_cr{}-{}r{}_channel_off_s2_seed{}".format(
+                prefix, args.experiment, d_flag, agva_tag,
                 str(float(args.cross_retain_start)),
                 str(float(args.cross_retain_end)),
                 args.cross_retain_ramp_epochs, args.seed))
     elif spec.get("bridge", False):
         fallback_suffix = "_nnfb" if args.bgm_fallback == "nearest" else ""
         stage2 = args.stage2_log_name or (
-            "{}_{}_d{}_b1{}_channel_off_s2_seed{}".format(
-                prefix, args.experiment, d_flag, fallback_suffix, args.seed))
+            "{}_{}_d{}{}_b1{}_channel_off_s2_seed{}".format(
+                prefix, args.experiment, d_flag, agva_tag,
+                fallback_suffix, args.seed))
     else:
         stage2 = args.stage2_log_name or (
-            "{}_{}_d{}_t{}_channel_off_s2_seed{}".format(
-                prefix, args.experiment, d_flag, t_flag, args.seed))
+            "{}_{}_d{}{}_t{}_channel_off_s2_seed{}".format(
+                prefix, args.experiment, d_flag, agva_tag, t_flag,
+                args.seed))
     stage1 = append_resolution_log_suffix(stage1, args)
     stage2 = append_resolution_log_suffix(stage2, args)
     stage1 = _append_eps_suffix(stage1, args.eps)
@@ -358,6 +399,31 @@ def _dynamic_args(args):
     return result
 
 
+def _agva_v2_args(args):
+    """Return only the opt-in AGVA-v2 arguments (merge-friendly hook)."""
+    result = []
+    if args.dynamic_agva_no_memory_update:
+        result.append("--dynamic-agva-no-memory-update")
+    if args.dynamic_agva_target == "ground-mixture":
+        result += [
+            "--dynamic-agva-target", "ground-mixture",
+            "--dynamic-agva-need-scale", str(args.dynamic_agva_need_scale),
+            "--dynamic-agva-ground-mask-dir",
+            _path(args.dynamic_agva_ground_mask_dir),
+        ]
+    return result
+
+
+def agva_v2_log_tag(args):
+    """Return compact tags placed immediately after the dynamic flag."""
+    tag = ""
+    if getattr(args, "dynamic_agva_no_memory_update", False):
+        tag += "mm"
+    if getattr(args, "dynamic_agva_target", "fixed") == "ground-mixture":
+        tag += "gm{:g}".format(float(args.dynamic_agva_need_scale))
+    return tag
+
+
 def _resolution_args(args):
     if args.res_aug_mode == "off":
         return []
@@ -386,6 +452,7 @@ def build_stage1_command(args, stage1_log_name=None, stage2_log_name=None):
     command += _resolution_args(args)
     if spec["dynamic_agva"]:
         command += _dynamic_args(args)
+        command += _agva_v2_args(args)
     return command
 
 
@@ -535,6 +602,23 @@ def validate_args(args):
     if not (0.0 < args.dynamic_agva_min_displacement <=
             args.dynamic_agva_max_displacement < 0.20):
         raise ValueError("invalid D-AGVA displacement range")
+    if args.dynamic_agva_need_scale <= 0:
+        raise ValueError("--dynamic-agva-need-scale must be positive")
+    if getattr(args, "_agva_v2_requested", False) and not spec["dynamic_agva"]:
+        raise ValueError(
+            "D-AGVA memory/target options require a dynamic experiment")
+    agva_v2_active = bool(_agva_v2_args(args))
+    if agva_v2_active and args.experiment != "dynamic":
+        raise ValueError(
+            "D-AGVA memory masking/ground-mixture currently supports only "
+            "the dynamic baseline trainer; bridge, confident, and "
+            "three-domain trainers are unsupported")
+    if (args.dynamic_agva_target == "ground-mixture"
+            and args.dataset_key != "agreidv2"
+            and not args.dynamic_agva_ground_mask_dir):
+        raise ValueError(
+            "--dynamic-agva-ground-mask-dir is required for "
+            "ground-mixture on AG-ReID.v1/LAGPeR")
     if args.cluster_n_jobs < 1:
         raise ValueError("--cluster-n-jobs must be at least 1")
     if args.bridge_topk < 1:
@@ -617,6 +701,15 @@ def _print_config(args, spec, stage1_log_name, stage2_log_name):
         print("D-AGVA mask dir: {}".format(_path(args.dynamic_agva_mask_dir)))
         print("D-AGVA image root: {}".format(
             _path(args.dynamic_agva_image_root)))
+        if _agva_v2_args(args):
+            print("D-AGVA no memory update: {}".format(
+                args.dynamic_agva_no_memory_update))
+            print("D-AGVA target: {}".format(args.dynamic_agva_target))
+            print("D-AGVA need scale: {}".format(
+                args.dynamic_agva_need_scale))
+            if args.dynamic_agva_target == "ground-mixture":
+                print("D-AGVA ground mask dir: {}".format(
+                    _path(args.dynamic_agva_ground_mask_dir)))
     if spec["three_domain"]:
         print("View score file: {}".format(_path(args.view_score_file)))
         print("View near ratio (per camera): {}".format(args.view_near_ratio))

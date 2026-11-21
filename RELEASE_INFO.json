@@ -1,5 +1,5 @@
 {
-  "release_name": "PCLHD_AGReID_bridge_release_20261120",
+  "release_name": "PCLHD_AGReID_agva_memory_mask_20261121",
   "dataset": "AG-ReID.v1 plus AG-ReID.v2 (baseline, three-domain, bridge, and confidence-aware matching)",
   "identity_rule": "concatenate P, T, and A filename fields",
   "expected_train_identities": 199,
@@ -99,7 +99,7 @@
       }
     }
   },
-  "purpose": "Controlled Stage-1 D-AGVA experiments with baseline, three-domain, cluster-selected bridge, and confidence-aware Stage-2 matching",
+  "purpose": "Controlled D-AGVA experiments with optional augmented-sample memory isolation and ground-geometry adaptive strength, plus the existing Stage-2 matching methods",
   "experiments": {
     "baseline": {
       "dynamic_agva": false,
@@ -170,7 +170,15 @@
     "confident_cross_retain_ramp_epochs_default": 20,
     "confident_cross_confidence_default": "margin",
     "cluster_lock_default": "disabled",
-    "cluster_lock_environment": "PCLHD_CLUSTER_LOCK"
+    "cluster_lock_environment": "PCLHD_CLUSTER_LOCK",
+    "dynamic_agva_no_memory_update_default": false,
+    "dynamic_agva_target_default": "fixed",
+    "dynamic_agva_target_modes": ["fixed", "ground-mixture"],
+    "dynamic_agva_need_scale_default": 0.2,
+    "dynamic_agva_ground_mask_coverage_minimum": 0.9,
+    "dynamic_agva_memory_mask_supported_experiment": "dynamic",
+    "dynamic_agva_new_switch_scope": "stage1_only",
+    "dynamic_agva_fixed_mode_rng_compatible": true
   },
   "training_artifacts_included": false,
   "dataset_included": false

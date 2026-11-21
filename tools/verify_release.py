@@ -26,6 +26,9 @@ REQUIRED = (
     "clustercontrast/utils/fast_dbscan.py",
     "clustercontrast/utils/cluster_lock.py",
     "clustercontrast/bridge_matching.py",
+    "clustercontrast/models/cm_masked.py",
+    "clustercontrast/trainers_agva_mask.py",
+    "clustercontrast/utils/data/agva_flag.py",
     "clustercontrast/trainers_confident_cross.py",
     "examples/PCLHD_AGReIDv2_test.py",
     "tools/preflight_agreidv2.py",
@@ -45,6 +48,8 @@ REQUIRED = (
     "scripts/prepare_agreidv2_view_scores.sh",
     "tests/test_view_domain_v2.py",
     "tests/test_dynamic_agva_coverage.py",
+    "tests/test_agva_memory_mask.py",
+    "AGVA_V2.md",
     "view_scores/agreid_aerial_view_scores_foreground.csv",
 )
 FORBIDDEN_SUFFIXES = (
@@ -119,6 +124,12 @@ def main():
             "channel_exchange_stage1", "channel_exchange_stage2"):
         if fixed[key] is not False:
             ok = fail("RELEASE_INFO does not fix {} to false".format(key)) and ok
+    if fixed.get("dynamic_agva_no_memory_update_default") is not False:
+        ok = fail(
+            "RELEASE_INFO must keep D-AGVA memory masking opt-in") and ok
+    if fixed.get("dynamic_agva_target_default") != "fixed":
+        ok = fail(
+            "RELEASE_INFO must keep the legacy fixed AGVA target default") and ok
 
     manifest_path = osp.join(ROOT, "MANIFEST_SHA256.txt")
     with open(manifest_path, "r", encoding="utf-8") as handle:
