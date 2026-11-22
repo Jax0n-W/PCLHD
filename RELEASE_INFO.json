@@ -1,5 +1,5 @@
 {
-  "release_name": "PCLHD_AGReID_agva_memory_mask_20261121",
+  "release_name": "PCLHD_AGReID_aspect_jitter_20261122",
   "dataset": "AG-ReID.v1 plus AG-ReID.v2 (baseline, three-domain, bridge, and confidence-aware matching)",
   "identity_rule": "concatenate P, T, and A filename fields",
   "expected_train_identities": 199,
@@ -99,7 +99,7 @@
       }
     }
   },
-  "purpose": "Controlled D-AGVA experiments with optional augmented-sample memory isolation and ground-geometry adaptive strength, plus the existing Stage-2 matching methods",
+  "purpose": "Training-only fixed and camera-geometry-adaptive aspect jitter, controlled D-AGVA experiments, and the existing Stage-2 matching methods",
   "experiments": {
     "baseline": {
       "dynamic_agva": false,
@@ -178,7 +178,15 @@
     "dynamic_agva_ground_mask_coverage_minimum": 0.9,
     "dynamic_agva_memory_mask_supported_experiment": "dynamic",
     "dynamic_agva_new_switch_scope": "stage1_only",
-    "dynamic_agva_fixed_mode_rng_compatible": true
+    "dynamic_agva_fixed_mode_rng_compatible": true,
+    "aspect_jitter_default": "off",
+    "aspect_jitter_modes": ["off", "both", "view", "geometry"],
+    "aspect_jitter_probability_default": 0.5,
+    "aspect_jitter_fixed_max_ratio_default": 0.2,
+    "aspect_jitter_geometry_max_ratio_default": 0.3,
+    "aspect_jitter_stages_default": 1,
+    "aspect_jitter_geometry_min_mask_coverage": 0.8,
+    "aspect_jitter_test_transform_changed": false
   },
   "training_artifacts_included": false,
   "dataset_included": false

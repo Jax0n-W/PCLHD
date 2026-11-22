@@ -29,6 +29,8 @@ REQUIRED = (
     "clustercontrast/models/cm_masked.py",
     "clustercontrast/trainers_agva_mask.py",
     "clustercontrast/utils/data/agva_flag.py",
+    "clustercontrast/utils/data/aspect_jitter.py",
+    "clustercontrast/utils/data/aspect_geometry.py",
     "clustercontrast/trainers_confident_cross.py",
     "examples/PCLHD_AGReIDv2_test.py",
     "tools/preflight_agreidv2.py",
@@ -49,7 +51,9 @@ REQUIRED = (
     "tests/test_view_domain_v2.py",
     "tests/test_dynamic_agva_coverage.py",
     "tests/test_agva_memory_mask.py",
+    "tests/test_aspect_jitter.py",
     "AGVA_V2.md",
+    "ASPECT_JITTER.md",
     "view_scores/agreid_aerial_view_scores_foreground.csv",
 )
 FORBIDDEN_SUFFIXES = (
@@ -130,6 +134,12 @@ def main():
     if fixed.get("dynamic_agva_target_default") != "fixed":
         ok = fail(
             "RELEASE_INFO must keep the legacy fixed AGVA target default") and ok
+    if fixed.get("aspect_jitter_default") != "off":
+        ok = fail(
+            "RELEASE_INFO must keep aspect jitter opt-in") and ok
+    if fixed.get("aspect_jitter_test_transform_changed") is not False:
+        ok = fail(
+            "RELEASE_INFO must keep evaluation transforms unchanged") and ok
 
     manifest_path = osp.join(ROOT, "MANIFEST_SHA256.txt")
     with open(manifest_path, "r", encoding="utf-8") as handle:
@@ -149,6 +159,7 @@ def main():
         print("RELEASE_VERIFICATION_PASSED")
         print("Channel conversion augmentation: OFF in both stages")
         print("Controlled experiments: baseline, dynamic, three_domain, full, bridge, dynamic_bridge, confident, dynamic_confident")
+        print("Training-only aspect jitter: opt-in (off by default)")
         return 0
     return 1
 

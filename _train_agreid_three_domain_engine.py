@@ -40,6 +40,12 @@ from clustercontrast.three_domain import (
 from clustercontrast.trainers_three_domain import \
     ClusterContrastTrainer_PCLMP_ThreeDomain
 from clustercontrast.utils.data import transforms as T
+from clustercontrast.utils.data.aspect_jitter import (
+    add_aspect_jitter_arguments, aspect_jitter_enabled,
+    build_aspect_train_transform, geometry_aspect_jitter_enabled,
+    prepare_aspect_jitter, validate_aspect_jitter_args)
+from clustercontrast.utils.data.aspect_geometry import (
+    get_train_loader_color_geometry, get_train_loader_ir_geometry)
 from clustercontrast.utils.data.resolution_augment import (
     add_resolution_augment_arguments, append_resolution_log_suffix,
     build_resolution_augmenters, print_resolution_stats,
@@ -319,6 +325,22 @@ def _map_agva_dataset(samples, labels, selected_paths):
 def _build_transforms(args):
     normalizer = T.Normalize(mean=[0.485, 0.456, 0.406],
                              std=[0.229, 0.224, 0.225])
+    if aspect_jitter_enabled(args, 2):
+        ground = build_aspect_train_transform(
+            args, 2, "ground", args.height, args.width, normalizer)
+        extra = []
+        if args.use_ground_clean_global_stage2:
+            extra.append(RandomGlobalResolutionDegradation(
+                probability=args.ground_global_downsample_prob,
+                min_scale=args.ground_global_min_scale,
+                max_scale=args.ground_global_max_scale,
+                min_low_size=args.ground_global_min_low_size))
+        ground_aug = build_aspect_train_transform(
+            args, 2, "ground", args.height, args.width, normalizer,
+            extra_before_tensor=extra)
+        aerial = build_aspect_train_transform(
+            args, 2, "aerial", args.height, args.width, normalizer)
+        return ground, ground_aug, aerial
     ground = T.Compose([
         T.Resize((args.height, args.width), interpolation=3), T.Pad(10),
         T.RandomCrop((args.height, args.width)),
@@ -443,6 +465,9 @@ def main_worker_stage2(args):
     aerial_train = sorted(dataset_ir.train)
     agva_candidate_map = _build_agva_candidate_map(aerial_train, args)
     ground_train = sorted(dataset_ground.train)
+    prepare_aspect_jitter(
+        args, 2, aerial_train, ground_train,
+        dataset_ir.images_dir, dataset_ground.images_dir, args.logs_dir)
     far_train, near_train, score_map = _prepare_view_groups(args, dataset_ir)
     far_paths = {sample[0] for sample in far_train}
     near_paths = {sample[0] for sample in near_train}
@@ -659,38 +684,46 @@ def main_worker_stage2(args):
 
         ground_transform, ground_aug_transform, aerial_transform = \
             _build_transforms(args)
-        loader_far = baseline.get_train_loader_ir(
+        ir_loader_builder = (
+            get_train_loader_ir_geometry
+            if geometry_aspect_jitter_enabled(args, 2) else
+            baseline.get_train_loader_ir)
+        ground_loader_builder = (
+            get_train_loader_color_geometry
+            if geometry_aspect_jitter_enabled(args, 2) else
+            baseline.get_train_loader_color)
+        loader_far = ir_loader_builder(
             args, dataset_ir, args.height, args.width, far_batch_size,
             args.workers, args.num_instances, iters,
             trainset=pseudo_far, no_cam=args.no_cam,
             train_transformer=aerial_transform,
             resolution_process=resolution_augmenters["aerial"])
-        loader_near = baseline.get_train_loader_ir(
+        loader_near = ir_loader_builder(
             args, dataset_ir, args.height, args.width, near_batch_size,
             args.workers, args.num_instances, iters,
             trainset=pseudo_near, no_cam=args.no_cam,
             train_transformer=aerial_transform,
             resolution_process=resolution_augmenters["aerial"])
-        loader_ground = baseline.get_train_loader_color(
+        loader_ground = ground_loader_builder(
             args, dataset_ground, args.height, args.width, args.batch_size,
             args.workers, args.num_instances, iters,
             trainset=pseudo_ground, no_cam=args.no_cam,
             train_transformer=ground_transform,
             train_transformer1=ground_aug_transform,
             resolution_process=resolution_augmenters["ground"])
-        loader_all_far = baseline.get_train_loader_ir(
+        loader_all_far = ir_loader_builder(
             args, dataset_ir, args.height, args.width, far_batch_size,
             args.workers, args.num_instances, iters,
             trainset=joint_far, no_cam=args.no_cam,
             train_transformer=aerial_transform,
             resolution_process=resolution_augmenters["aerial"])
-        loader_all_near = baseline.get_train_loader_ir(
+        loader_all_near = ir_loader_builder(
             args, dataset_ir, args.height, args.width, near_batch_size,
             args.workers, args.num_instances, iters,
             trainset=joint_near, no_cam=args.no_cam,
             train_transformer=aerial_transform,
             resolution_process=resolution_augmenters["aerial"])
-        loader_all_ground = baseline.get_train_loader_color(
+        loader_all_ground = ground_loader_builder(
             args, dataset_ground, args.height, args.width, args.batch_size,
             args.workers, args.num_instances, iters,
             trainset=joint_ground, no_cam=args.no_cam,
@@ -825,6 +858,10 @@ def build_parser():
         agva_near_probability=None,
         agva_selection_mode='global',
         stage2_aerial_root='')
+    parser.add_argument("--dynamic-agva-mask-dir", default="")
+    parser.add_argument("--dynamic-agva-image-root", default="")
+    parser.set_defaults(use_dynamic_agva=False)
+    add_aspect_jitter_arguments(parser)
     add_resolution_augment_arguments(parser)
     return parser
 
@@ -835,6 +872,7 @@ def main(argv=None):
     args.cluster_lock_file = resolve_cluster_lock_file(
         args.cluster_lock_file)
     validate_resolution_augment_args(args)
+    validate_aspect_jitter_args(args)
     args.eps_all = resolve_eps_all(args)
     args.stage2_log_name = append_resolution_log_suffix(
         args.stage2_log_name, args)

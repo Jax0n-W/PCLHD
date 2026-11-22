@@ -47,6 +47,14 @@ from clustercontrast.utils.data.agva_flag import (
     get_train_loader_ir_flag, prepare_ground_mixture,
     validate_agva_flag_args,
 )
+from clustercontrast.utils.data.aspect_jitter import (
+    add_aspect_jitter_arguments, aspect_jitter_enabled,
+    build_aspect_train_transform, geometry_aspect_jitter_enabled,
+    prepare_aspect_jitter, validate_aspect_jitter_args,
+)
+from clustercontrast.utils.data.aspect_geometry import (
+    get_train_loader_color_geometry, get_train_loader_ir_geometry,
+)
 from clustercontrast.utils.data.resolution_augment import (
     add_resolution_augment_arguments, append_resolution_log_suffix,
     build_resolution_augmenters, print_resolution_stats,
@@ -614,6 +622,7 @@ def main():
         args.stage2_log_name, args.eps, args.eps_all)
     validate_dynamic_agva_args(args)
     validate_agva_flag_args(args)
+    validate_aspect_jitter_args(args)
     if (agva_flag_loader_enabled(args)
             and getattr(args, 'use_confident_alignment_stage2', False)):
         parser.error(
@@ -694,6 +703,9 @@ def main_worker_stage1(args,log_s1_name):
     prepare_ground_mixture(
         args, dataset_ir.train, dataset_rgb.train,
         dataset_ir.images_dir, dataset_rgb.images_dir)
+    prepare_aspect_jitter(
+        args, 1, dataset_ir.train, dataset_rgb.train,
+        dataset_ir.images_dir, dataset_rgb.images_dir, args.logs_dir)
     resolution_augmenters = build_resolution_augmenters(
         args, dataset_ir.train, dataset_rgb.train, stage=1,
         aerial_root=dataset_ir.images_dir,
@@ -920,36 +932,53 @@ def main_worker_stage1(args,log_s1_name):
                              std=[0.229, 0.224, 0.225])
         height=args.height
         width=args.width
-        train_transformer_rgb = T.Compose([
-        T.Resize((height, width), interpolation=3),
-        T.Pad(10),
-        T.RandomCrop((height, width)),
-        T.RandomHorizontalFlip(p=0.5),
-        T.ToTensor(),
-        normalizer,
-        ChannelRandomErasing(probability = 0.5)
-        ])
-        
-        train_transformer_rgb1 = T.Compose([
-        T.Resize((height, width), interpolation=3),
-        T.Pad(10),
-        T.RandomCrop((height, width)),
-        T.RandomHorizontalFlip(p=0.5),
-        T.ToTensor(),
-        normalizer,
-        ChannelRandomErasing(probability = 0.5)
-        ])
+        if aspect_jitter_enabled(args, 1):
+            train_transformer_rgb = build_aspect_train_transform(
+                args, 1, 'ground', height, width, normalizer)
+            train_transformer_rgb1 = build_aspect_train_transform(
+                args, 1, 'ground', height, width, normalizer)
+            transform_thermal = build_aspect_train_transform(
+                args, 1, 'aerial', height, width, normalizer,
+                crop_size=(288, 144))
+        else:
+            train_transformer_rgb = T.Compose([
+            T.Resize((height, width), interpolation=3),
+            T.Pad(10),
+            T.RandomCrop((height, width)),
+            T.RandomHorizontalFlip(p=0.5),
+            T.ToTensor(),
+            normalizer,
+            ChannelRandomErasing(probability = 0.5)
+            ])
 
-        transform_thermal = build_ir_train_transform(args, height, width, normalizer)
+            train_transformer_rgb1 = T.Compose([
+            T.Resize((height, width), interpolation=3),
+            T.Pad(10),
+            T.RandomCrop((height, width)),
+            T.RandomHorizontalFlip(p=0.5),
+            T.ToTensor(),
+            normalizer,
+            ChannelRandomErasing(probability = 0.5)
+            ])
 
-        ir_loader_builder = (get_train_loader_ir_flag
-                             if use_agva_flags else get_train_loader_ir)
+            transform_thermal = build_ir_train_transform(
+                args, height, width, normalizer)
+
+        ir_loader_builder = (
+            get_train_loader_ir_geometry
+            if geometry_aspect_jitter_enabled(args, 1) else
+            (get_train_loader_ir_flag
+             if use_agva_flags else get_train_loader_ir))
+        rgb_loader_builder = (
+            get_train_loader_color_geometry
+            if geometry_aspect_jitter_enabled(args, 1) else
+            get_train_loader_color)
         train_loader_ir = ir_loader_builder(args, dataset_ir, args.height, args.width,
                                         args.batch_size, args.workers, args.num_instances, iters,
                                         trainset=pseudo_labeled_dataset_ir, no_cam=args.no_cam,train_transformer=transform_thermal,
                                         resolution_process=resolution_augmenters['aerial'])
 
-        train_loader_rgb = get_train_loader_color(args, dataset_rgb, args.height, args.width,
+        train_loader_rgb = rgb_loader_builder(args, dataset_rgb, args.height, args.width,
                                         args.batch_size//2, args.workers, args.num_instances, iters,
                                         trainset=pseudo_labeled_dataset_rgb, no_cam=args.no_cam,train_transformer=train_transformer_rgb,train_transformer1=train_transformer_rgb1,
                                         resolution_process=resolution_augmenters['ground'])
@@ -1061,6 +1090,9 @@ def main_worker_stage2(args,log_s1_name,log_s2_name,stage1_checkpoint=None):
     prepare_ground_mixture(
         args, dataset_ir.train, dataset_rgb.train,
         dataset_ir.images_dir, dataset_rgb.images_dir)
+    prepare_aspect_jitter(
+        args, 2, dataset_ir.train, dataset_rgb.train,
+        dataset_ir.images_dir, dataset_rgb.images_dir, args.logs_dir)
     resolution_augmenters = build_resolution_augmenters(
         args, dataset_ir.train, dataset_rgb.train, stage=2,
         aerial_root=dataset_ir.images_dir,
@@ -1491,36 +1523,53 @@ def main_worker_stage2(args,log_s1_name,log_s2_name,stage1_checkpoint=None):
                              std=[0.229, 0.224, 0.225])
         height=args.height
         width=args.width
-        train_transformer_rgb = T.Compose([
-        T.Resize((height, width), interpolation=3),
-        T.Pad(10),
-        T.RandomCrop((height, width)),
-        T.RandomHorizontalFlip(p=0.5),
-        T.ToTensor(),
-        normalizer,
-        ChannelRandomErasing(probability = 0.5)
-        ])
-        
-        train_transformer_rgb1 = T.Compose([
-        T.Resize((height, width), interpolation=3),
-        T.Pad(10),
-        T.RandomCrop((height, width)),
-        T.RandomHorizontalFlip(p=0.5),
-        T.ToTensor(),
-        normalizer,
-        ChannelRandomErasing(probability = 0.5)
-        ])
+        if aspect_jitter_enabled(args, 2):
+            train_transformer_rgb = build_aspect_train_transform(
+                args, 2, 'ground', height, width, normalizer)
+            train_transformer_rgb1 = build_aspect_train_transform(
+                args, 2, 'ground', height, width, normalizer)
+            transform_thermal = build_aspect_train_transform(
+                args, 2, 'aerial', height, width, normalizer,
+                crop_size=(288, 144))
+        else:
+            train_transformer_rgb = T.Compose([
+            T.Resize((height, width), interpolation=3),
+            T.Pad(10),
+            T.RandomCrop((height, width)),
+            T.RandomHorizontalFlip(p=0.5),
+            T.ToTensor(),
+            normalizer,
+            ChannelRandomErasing(probability = 0.5)
+            ])
 
-        transform_thermal = build_ir_train_transform(args, height, width, normalizer)
+            train_transformer_rgb1 = T.Compose([
+            T.Resize((height, width), interpolation=3),
+            T.Pad(10),
+            T.RandomCrop((height, width)),
+            T.RandomHorizontalFlip(p=0.5),
+            T.ToTensor(),
+            normalizer,
+            ChannelRandomErasing(probability = 0.5)
+            ])
 
-        ir_loader_builder = (get_train_loader_ir_flag
-                             if use_agva_flags else get_train_loader_ir)
+            transform_thermal = build_ir_train_transform(
+                args, height, width, normalizer)
+
+        ir_loader_builder = (
+            get_train_loader_ir_geometry
+            if geometry_aspect_jitter_enabled(args, 2) else
+            (get_train_loader_ir_flag
+             if use_agva_flags else get_train_loader_ir))
+        rgb_loader_builder = (
+            get_train_loader_color_geometry
+            if geometry_aspect_jitter_enabled(args, 2) else
+            get_train_loader_color)
         train_loader_ir = ir_loader_builder(args, dataset_ir, args.height, args.width,
                                         args.batch_size, args.workers, args.num_instances, iters,
                                         trainset=pseudo_labeled_dataset_ir, no_cam=args.no_cam,train_transformer=transform_thermal,
                                         resolution_process=resolution_augmenters['aerial'])
 
-        train_loader_rgb = get_train_loader_color(args, dataset_rgb, args.height, args.width,
+        train_loader_rgb = rgb_loader_builder(args, dataset_rgb, args.height, args.width,
                                         args.batch_size, args.workers, args.num_instances, iters,
                                         trainset=pseudo_labeled_dataset_rgb, no_cam=args.no_cam,train_transformer=train_transformer_rgb,train_transformer1=train_transformer_rgb1,
                                         resolution_process=resolution_augmenters['ground'])
@@ -1530,7 +1579,7 @@ def main_worker_stage2(args,log_s1_name,log_s2_name,stage1_checkpoint=None):
                                                   train_transformer=transform_thermal,
                                                   resolution_process=resolution_augmenters['aerial'])
 
-        train_loader_all_rgb = get_train_loader_color(args, dataset_rgb, args.height, args.width,
+        train_loader_all_rgb = rgb_loader_builder(args, dataset_rgb, args.height, args.width,
                                                       args.batch_size, args.workers, args.num_instances, iters,
                                                       trainset=pseudo_labeled_dataset_all_rgb, no_cam=args.no_cam,
                                                       train_transformer=train_transformer_rgb,
@@ -1735,6 +1784,7 @@ if __name__ == '__main__':
         default_image_root='/home/lab338/Jaxon/dataset/AGreid_train',
     )
     add_agva_flag_arguments(parser)
+    add_aspect_jitter_arguments(parser)
     add_resolution_augment_arguments(parser)
 
     main()

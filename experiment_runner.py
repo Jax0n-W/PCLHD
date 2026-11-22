@@ -18,6 +18,10 @@ import sys
 from clustercontrast.utils.data.resolution_augment import (
     add_resolution_augment_arguments, append_resolution_log_suffix,
     resolution_log_suffix, validate_resolution_augment_args)
+from clustercontrast.utils.data.aspect_jitter import (
+    ASPECT_JITTER_MODES, ASPECT_JITTER_STAGES,
+    aspect_jitter_enabled, effective_aspect_max_ratio,
+    validate_aspect_jitter_args)
 
 
 PROJECT_ROOT = osp.dirname(osp.abspath(__file__))
@@ -166,6 +170,17 @@ def build_parser():
         "--dynamic-agva-ground-mask-dir", default="",
         action=_AGVAV2Store)
     parser.set_defaults(_agva_v2_requested=False)
+    parser.add_argument(
+        "--aspect-jitter", choices=ASPECT_JITTER_MODES, default="off")
+    parser.add_argument(
+        "--aspect-jitter-max-ratio", type=float, default=None,
+        help="default: 0.2 for fixed modes, 0.3 for geometry")
+    parser.add_argument(
+        "--aspect-jitter-prob", type=float, default=0.5)
+    parser.add_argument(
+        "--aspect-jitter-stages", type=int,
+        choices=ASPECT_JITTER_STAGES, default=1)
+    parser.add_argument("--aspect-jitter-ground-mask-dir", default="")
 
     parser.add_argument(
         "--view-score-file", default="",
@@ -249,6 +264,10 @@ def resolve_dataset_paths(args):
             and args.dynamic_agva_target == "ground-mixture"
             and not args.dynamic_agva_ground_mask_dir):
         args.dynamic_agva_ground_mask_dir = args.dynamic_agva_mask_dir
+    if (args.dataset_key == "agreidv2"
+            and args.aspect_jitter == "geometry"
+            and not args.aspect_jitter_ground_mask_dir):
+        args.aspect_jitter_ground_mask_dir = args.dynamic_agva_mask_dir
     return args
 
 
@@ -307,26 +326,27 @@ def default_log_names(args, spec=None):
     t_flag = int(spec["three_domain"])
     prefix = "agreidv2_dt" if args.dataset_key == "agreidv2" else "agreid_dt"
     agva_tag = agva_v2_log_tag(args)
+    aspect_tag = aspect_jitter_log_tag(args)
     stage1 = args.stage1_log_name or (
-        "{}_s1_d{}{}_channel_off_seed{}".format(
-            prefix, d_flag, agva_tag, args.seed))
+        "{}_s1_d{}{}{}_channel_off_seed{}".format(
+            prefix, d_flag, agva_tag, aspect_tag, args.seed))
     if spec.get("confident_cross", False):
         stage2 = args.stage2_log_name or (
-            "{}_{}_d{}{}_cr{}-{}r{}_channel_off_s2_seed{}".format(
-                prefix, args.experiment, d_flag, agva_tag,
+            "{}_{}_d{}{}{}_cr{}-{}r{}_channel_off_s2_seed{}".format(
+                prefix, args.experiment, d_flag, agva_tag, aspect_tag,
                 str(float(args.cross_retain_start)),
                 str(float(args.cross_retain_end)),
                 args.cross_retain_ramp_epochs, args.seed))
     elif spec.get("bridge", False):
         fallback_suffix = "_nnfb" if args.bgm_fallback == "nearest" else ""
         stage2 = args.stage2_log_name or (
-            "{}_{}_d{}{}_b1{}_channel_off_s2_seed{}".format(
-                prefix, args.experiment, d_flag, agva_tag,
+            "{}_{}_d{}{}{}_b1{}_channel_off_s2_seed{}".format(
+                prefix, args.experiment, d_flag, agva_tag, aspect_tag,
                 fallback_suffix, args.seed))
     else:
         stage2 = args.stage2_log_name or (
-            "{}_{}_d{}{}_t{}_channel_off_s2_seed{}".format(
-                prefix, args.experiment, d_flag, agva_tag, t_flag,
+            "{}_{}_d{}{}{}_t{}_channel_off_s2_seed{}".format(
+                prefix, args.experiment, d_flag, agva_tag, aspect_tag, t_flag,
                 args.seed))
     stage1 = append_resolution_log_suffix(stage1, args)
     stage2 = append_resolution_log_suffix(stage2, args)
@@ -424,6 +444,41 @@ def agva_v2_log_tag(args):
     return tag
 
 
+def _aspect_jitter_args(args, stage):
+    """Return stage-scoped aspect-jitter arguments for every engine."""
+    if not aspect_jitter_enabled(args, stage):
+        return []
+    result = [
+        "--aspect-jitter", args.aspect_jitter,
+        "--aspect-jitter-max-ratio", str(effective_aspect_max_ratio(args)),
+        "--aspect-jitter-prob", str(args.aspect_jitter_prob),
+        "--aspect-jitter-stages", str(args.aspect_jitter_stages),
+    ]
+    if args.aspect_jitter == "geometry":
+        result += [
+            "--aspect-jitter-ground-mask-dir",
+            _path(args.aspect_jitter_ground_mask_dir),
+            "--dynamic-agva-mask-dir", _path(args.dynamic_agva_mask_dir),
+            "--dynamic-agva-image-root", _path(args.dynamic_agva_image_root),
+        ]
+    return result
+
+
+def aspect_jitter_log_tag(args):
+    mode = getattr(args, "aspect_jitter", "off")
+    if mode == "off":
+        return ""
+    if mode == "geometry":
+        tag = "ajgeop{:g}".format(float(args.aspect_jitter_prob))
+    else:
+        tag = "aj{}{:g}p{:g}".format(
+            mode, effective_aspect_max_ratio(args),
+            float(args.aspect_jitter_prob))
+    if int(args.aspect_jitter_stages) != 1:
+        tag += "s{}".format(args.aspect_jitter_stages)
+    return tag
+
+
 def _resolution_args(args):
     if args.res_aug_mode == "off":
         return []
@@ -453,6 +508,7 @@ def build_stage1_command(args, stage1_log_name=None, stage2_log_name=None):
     if spec["dynamic_agva"]:
         command += _dynamic_args(args)
         command += _agva_v2_args(args)
+    command += _aspect_jitter_args(args, 1)
     return command
 
 
@@ -493,6 +549,7 @@ def build_stage2_command(args, checkpoint, stage1_log_name=None,
         if args.log_gt_match_accuracy:
             command.append("--log-gt-match-accuracy")
         command += _resolution_args(args)
+        command += _aspect_jitter_args(args, 2)
         if args.eps_all is not None:
             command += ["--eps-all", str(args.eps_all)]
         if args.dump_cluster_dist_epoch >= 0:
@@ -510,6 +567,7 @@ def build_stage2_command(args, checkpoint, stage1_log_name=None,
             "--stage2-memorybank", "CMhard", "--no-ema-loss",
         ]
         command += _resolution_args(args)
+        command += _aspect_jitter_args(args, 2)
         if args.eps_all is not None:
             command += ["--eps-all", str(args.eps_all)]
         if args.dump_cluster_dist_epoch >= 0:
@@ -574,6 +632,7 @@ def build_stage2_command(args, checkpoint, stage1_log_name=None,
         command += [
             "--dump-cluster-dist-epoch", str(args.dump_cluster_dist_epoch)]
     command += _resolution_args(args)
+    command += _aspect_jitter_args(args, 2)
     return command
 
 
@@ -589,6 +648,7 @@ def validate_args(args):
     resolve_dataset_paths(args)
     spec = get_experiment_spec(args.experiment)
     validate_resolution_augment_args(args)
+    validate_aspect_jitter_args(args)
     if args.run_mode == "stage2" and not args.stage1_checkpoint:
         raise ValueError("--run-mode stage2 requires --stage1-checkpoint")
     if args.run_mode != "stage2" and args.stage1_checkpoint:
@@ -635,6 +695,18 @@ def validate_args(args):
         raise ValueError(
             "--dump-cluster-dist-epoch must be -1 or a zero-based epoch "
             "smaller than --epochs")
+    if (args.aspect_jitter == "geometry"
+            and args.dataset_key != "agreidv2"
+            and not args.aspect_jitter_ground_mask_dir):
+        active_stage = (
+            (args.run_mode in ("full", "stage1")
+             and aspect_jitter_enabled(args, 1))
+            or (args.run_mode in ("full", "stage2")
+                and aspect_jitter_enabled(args, 2)))
+        if active_stage:
+            raise ValueError(
+                "--aspect-jitter-ground-mask-dir is required for geometry "
+                "mode on AG-ReID.v1/LAGPeR")
 
     if args.dry_run:
         return
@@ -654,6 +726,18 @@ def validate_args(args):
         raise FileNotFoundError("Stage 1 checkpoint not found: {}".format(
             args.stage1_checkpoint))
     runs_stage2 = args.run_mode in ("full", "stage2")
+    if args.aspect_jitter == "geometry":
+        active_geometry = (
+            (runs_stage1 and aspect_jitter_enabled(args, 1))
+            or (runs_stage2 and aspect_jitter_enabled(args, 2)))
+        if active_geometry:
+            for label, path in (
+                    ("aerial", args.dynamic_agva_mask_dir),
+                    ("ground", args.aspect_jitter_ground_mask_dir)):
+                if not osp.isdir(_path(path)):
+                    raise FileNotFoundError(
+                        "Aspect geometry {} mask directory not found: {}"
+                        .format(label, path))
     needs_view_scores = (spec["three_domain"] or (
         spec.get("bridge", False) and args.bridge_score == "view_csv"))
     if runs_stage2 and needs_view_scores and not osp.isfile(
@@ -697,6 +781,15 @@ def _print_config(args, spec, stage1_log_name, stage2_log_name):
                   args.res_aug_patch_area[1]))
         print("Resolution log suffix: {}".format(
             resolution_log_suffix(args)))
+    if args.aspect_jitter != "off":
+        print("Aspect jitter: mode={} max_ratio={} prob={} stages={}"
+              .format(args.aspect_jitter, effective_aspect_max_ratio(args),
+                      args.aspect_jitter_prob, args.aspect_jitter_stages))
+        print("Aspect jitter log tag: {}".format(
+            aspect_jitter_log_tag(args)))
+        if args.aspect_jitter == "geometry":
+            print("Aspect jitter ground mask dir: {}".format(
+                _path(args.aspect_jitter_ground_mask_dir)))
     if spec["dynamic_agva"]:
         print("D-AGVA mask dir: {}".format(_path(args.dynamic_agva_mask_dir)))
         print("D-AGVA image root: {}".format(
