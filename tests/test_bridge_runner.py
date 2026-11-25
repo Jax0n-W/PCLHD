@@ -77,7 +77,7 @@ class BridgeRunnerTests(unittest.TestCase):
             "--cross-retain-end", "0.9",
             "--cross-retain-ramp-epochs", "12",
             "--cross-confidence", "similarity",
-            "--bridge-ratio", "0.25", "--bgm-fallback", "nearest")
+            "--bridge-ratio", "0.25")
         stage1, stage2 = runner.default_log_names(args)
         self.assertEqual(
             stage1, "agreidv2_dt_s1_d0_channel_off_seed1_eps0.6")
@@ -100,6 +100,46 @@ class BridgeRunnerTests(unittest.TestCase):
         self.assertEqual(
             command[command.index("--cross-confidence") + 1],
             "similarity")
+
+    def test_confident_default_fallback_and_original_log_names(self):
+        names_by_dataset = {
+            "agreid": (
+                "agreid_dt_s1_d0_channel_off_seed1_eps0.6",
+                "agreid_dt_confident_d0_cr0.4-1.0r20_channel_off_s2_seed1_eps0.6"),
+            "agreidv2": (
+                "agreidv2_dt_s1_d0_channel_off_seed1_eps0.6",
+                "agreidv2_dt_confident_d0_cr0.4-1.0r20_channel_off_s2_seed1_eps0.6"),
+        }
+        for dataset, names in names_by_dataset.items():
+            with self.subTest(dataset=dataset):
+                args = parse("--dataset-key", dataset,
+                             "--experiment", "confident", "--eps", "0.6")
+                self.assertEqual(runner.default_log_names(args), names)
+                command = runner.build_stage2_command(
+                    args, "/tmp/model_best.pth.tar")
+                self.assertEqual(
+                    command[command.index("--bgm-fallback") + 1], "pclhd")
+
+    def test_confident_experiments_forward_nearest_with_fixed_ratio(self):
+        names_by_experiment = {
+            "confident":
+                "agreid_dt_confident_d0_cr0.4-1.0r20_nnfb_channel_off_s2_seed1_eps0.6",
+            "dynamic_confident":
+                "agreid_dt_dynamic_confident_d1_cr0.4-1.0r20_nnfb_channel_off_s2_seed1_eps0.6",
+        }
+        for experiment, expected in names_by_experiment.items():
+            with self.subTest(experiment=experiment):
+                args = parse("--experiment", experiment, "--eps", "0.6",
+                             "--bgm-fallback", "nearest", "--bridge-ratio",
+                             "0.25", "--log-gt-match-accuracy")
+                self.assertEqual(runner.default_log_names(args)[1], expected)
+                command = runner.build_stage2_command(
+                    args, "/tmp/model_best.pth.tar")
+                self.assertEqual(
+                    command[command.index("--bgm-fallback") + 1], "nearest")
+                self.assertEqual(
+                    command[command.index("--bridge-ratio") + 1], "1.0")
+                self.assertIn("--log-gt-match-accuracy", command)
 
     def test_dynamic_confident_reuses_dynamic_stage1(self):
         args = parse(
@@ -154,7 +194,7 @@ class BridgeRunnerTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn("Confidence-aware cross matching (Stage 2): True", text)
         self.assertIn("Fixed bridge ratio: 1.0", text)
-        self.assertIn("Fixed BGM fallback: pclhd", text)
+        self.assertIn("BGM fallback: pclhd", text)
         self.assertIn("Cross confidence: margin", text)
         self.assertIn(
             "agreidv2_dt_confident_d0_cr0.4-1.0r20_channel_off_s2_seed1_eps0.6",

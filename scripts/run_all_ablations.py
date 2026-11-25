@@ -205,6 +205,8 @@ def main(argv=None):
                 str(args.cross_retain_ramp_epochs),
                 "--cross-confidence", args.cross_confidence,
             ]
+            if args.bgm_fallback == "nearest":
+                command += ["--bgm-fallback", args.bgm_fallback]
             if args.log_gt_match_accuracy:
                 command.append("--log-gt-match-accuracy")
         if args.eps_all is not None:

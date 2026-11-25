@@ -109,13 +109,9 @@ def _validate_args(args):
     if args.cross_confidence not in CROSS_CONFIDENCE_MODES:
         raise ValueError("unknown --cross-confidence: {}".format(
             args.cross_confidence))
-    if args.confident_cross:
-        if abs(args.bridge_ratio - 1.0) > 1e-12:
-            raise ValueError(
-                "confidence-aware cross matching requires --bridge-ratio 1.0")
-        if args.bgm_fallback != "pclhd":
-            raise ValueError(
-                "confidence-aware cross matching requires --bgm-fallback pclhd")
+    if args.confident_cross and abs(args.bridge_ratio - 1.0) > 1e-12:
+        raise ValueError(
+            "confidence-aware cross matching requires --bridge-ratio 1.0")
     if args.bridge_score == "view_csv":
         path = _resolve_project_path(args.view_score_file)
         if not path or not osp.isfile(path):
@@ -391,6 +387,12 @@ def main_worker_stage2(args):
                 full_i2r))
 
         if args.confident_cross:
+            if args.bgm_fallback == "pclhd" and num_ground < num_aerial:
+                print(
+                    "WARNING: ground clusters ({}) < aerial clusters ({}); "
+                    "cross-view loss is disabled this epoch. "
+                    "Use --bgm-fallback nearest.".format(
+                        num_ground, num_aerial))
             retain_ratio = cross_retain_ratio(
                 epoch, args.cross_retain_start, args.cross_retain_end,
                 args.cross_retain_ramp_epochs)

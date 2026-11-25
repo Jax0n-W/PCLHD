@@ -79,10 +79,11 @@ both mappings and is never consumed by optimization.
 ## Confidence-aware cross-view matching
 
 `confident` and `dynamic_confident` are separate opt-in experiments. Their
-Stage 2 uses this bridge engine with `--bridge-ratio 1.0` and
-`--bgm-fallback pclhd`, so the unfiltered centers and mappings are the same as
-baseline. `confident` reuses the d0 Stage-1 checkpoint;
-`dynamic_confident` reuses d1.
+Stage 2 uses this bridge engine with `--bridge-ratio 1.0`. The default
+`--bgm-fallback pclhd` gives the baseline unfiltered centers and mappings.
+Both experiments also accept `--bgm-fallback nearest`, which adds `_nnfb`
+after the retention schedule in the Stage-2 log name. `confident` reuses the
+d0 Stage-1 checkpoint. `dynamic_confident` reuses d1.
 
 | Parameter | Default | Meaning |
 |---|---:|---|
@@ -98,12 +99,35 @@ matched cosine similarity minus the best unmatched alternative in the same
 direction. Samples whose source cluster is not retained contribute no
 cross-view loss. The remaining samples are averaged normally; the `0.25`
 weight and odd/even alternating direction are unchanged. At retention `1.0`,
-the trainer is loss-equivalent to the baseline no-EMA-loss trainer.
+the trainer is loss-equivalent to the baseline no-EMA-loss trainer given the
+same mappings.
 
 Every epoch logs the retention ratio, retained/total mappings, and retained
 mean confidence. With `--log-gt-match-accuracy`, retained and removed GT
 matching accuracy is printed separately for both directions and never affects
 training.
+
+### AG-ReID.v1
+
+On v1, Stage 2 typically has fewer ground clusters than aerial clusters.
+Use `--bgm-fallback nearest` so both directions have mappings to rank.
+`nearest` uses Hungarian matching for the one-to-one pairs and assigns
+each remaining cluster to its nearest prototype. In epochs with fewer
+ground clusters, the default `pclhd` produces empty mappings and prints a
+warning that cross-view loss is disabled.
+
+Use `--experiment bridge --bridge-ratio 1.0 --bgm-fallback nearest` as the
+unfiltered control. It uses the same full-cluster centers and mappings as
+`confident` with `nearest` at retention `1.0`, and the losses are identical.
+
+```bash
+python train_agreid.py --dataset-key agreid --experiment confident --run-mode stage2 \
+  --stage1-checkpoint "$S1" --eps 0.6 --dbscan-backend fast --seed 1 \
+  --bgm-fallback nearest \
+  --cross-retain-start 0.4 --cross-retain-end 1.0 --cross-retain-ramp-epochs 20 \
+  --cross-confidence margin --log-gt-match-accuracy \
+  --data-dir "$DATA" --logs-dir "$LOGS"
+```
 
 ## Difference from three-domain matching
 

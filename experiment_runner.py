@@ -330,15 +330,15 @@ def default_log_names(args, spec=None):
     stage1 = args.stage1_log_name or (
         "{}_s1_d{}{}{}_channel_off_seed{}".format(
             prefix, d_flag, agva_tag, aspect_tag, args.seed))
+    fallback_suffix = "_nnfb" if args.bgm_fallback == "nearest" else ""
     if spec.get("confident_cross", False):
         stage2 = args.stage2_log_name or (
-            "{}_{}_d{}{}{}_cr{}-{}r{}_channel_off_s2_seed{}".format(
+            "{}_{}_d{}{}{}_cr{}-{}r{}{}_channel_off_s2_seed{}".format(
                 prefix, args.experiment, d_flag, agva_tag, aspect_tag,
                 str(float(args.cross_retain_start)),
                 str(float(args.cross_retain_end)),
-                args.cross_retain_ramp_epochs, args.seed))
+                args.cross_retain_ramp_epochs, fallback_suffix, args.seed))
     elif spec.get("bridge", False):
-        fallback_suffix = "_nnfb" if args.bgm_fallback == "nearest" else ""
         stage2 = args.stage2_log_name or (
             "{}_{}_d{}{}{}_b1{}_channel_off_s2_seed{}".format(
                 prefix, args.experiment, d_flag, agva_tag, aspect_tag,
@@ -532,8 +532,7 @@ def build_stage2_command(args, checkpoint, stage1_log_name=None,
             "--bridge-topk", str(args.bridge_topk),
             "--bridge-ratio", ("1.0" if confident_cross
                                else str(args.bridge_ratio)),
-            "--bgm-fallback", ("pclhd" if confident_cross
-                               else args.bgm_fallback),
+            "--bgm-fallback", args.bgm_fallback,
             "--view-score-file", _path(args.view_score_file),
             "--view-score-path-mode", args.view_score_path_mode,
         ]
@@ -810,14 +809,11 @@ def _print_config(args, spec, stage1_log_name, stage2_log_name):
         effective_bridge_ratio = (
             1.0 if spec.get("confident_cross", False)
             else args.bridge_ratio)
-        effective_bgm_fallback = (
-            "pclhd" if spec.get("confident_cross", False)
-            else args.bgm_fallback)
         print("Bridge score: {}".format(args.bridge_score))
         print("Bridge top-k: {}".format(args.bridge_topk))
         print("Bridge ratio (within each cluster): {}".format(
             effective_bridge_ratio))
-        print("BGM fallback: {}".format(effective_bgm_fallback))
+        print("BGM fallback: {}".format(args.bgm_fallback))
         print("Bridge GT match diagnostics: {}".format(
             args.log_gt_match_accuracy))
         if args.bridge_score == "view_csv":
@@ -826,7 +822,6 @@ def _print_config(args, spec, stage1_log_name, stage2_log_name):
     if spec.get("confident_cross", False):
         print("Confidence-aware cross matching (Stage 2): True")
         print("Fixed bridge ratio: 1.0")
-        print("Fixed BGM fallback: pclhd")
         print("Cross retention: start={}, end={}, ramp_epochs={}".format(
             args.cross_retain_start, args.cross_retain_end,
             args.cross_retain_ramp_epochs))
