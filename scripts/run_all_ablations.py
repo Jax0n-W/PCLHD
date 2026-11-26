@@ -20,7 +20,10 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from experiment_runner import (
-    DEFAULT_EPS, dataset_default_paths, eps_log_suffix)
+    DEFAULT_EPS, dataset_default_paths, eps_log_suffix, get_experiment_spec)
+from clustercontrast.aerial_merge import (
+    add_aerial_merge_arguments, aerial_merge_cli_args,
+    validate_aerial_merge_args)
 
 DEFAULT_EXPERIMENTS = ("baseline", "dynamic", "three_domain", "full")
 ALL_EXPERIMENTS = DEFAULT_EXPERIMENTS + (
@@ -75,6 +78,7 @@ def build_parser():
         default="ground_knn")
     parser.add_argument("--bridge-topk", type=int, default=10)
     parser.add_argument("--bridge-ratio", type=float, default=0.50)
+    add_aerial_merge_arguments(parser)
     parser.add_argument(
         "--bgm-fallback", choices=("pclhd", "nearest"), default="pclhd")
     parser.add_argument("--cross-retain-start", type=float, default=0.4)
@@ -156,6 +160,9 @@ def stage1_checkpoint(args, dynamic):
 def main(argv=None):
     args = build_parser().parse_args(argv)
     selected = list(dict.fromkeys(args.experiments))
+    validate_aerial_merge_args(
+        args, supports_bridge=all(
+            get_experiment_spec(name).get("bridge", False) for name in selected))
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
     env.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
@@ -215,6 +222,7 @@ def main(argv=None):
             command += [
                 "--dump-cluster-dist-epoch",
                 str(args.dump_cluster_dist_epoch)]
+        command += aerial_merge_cli_args(args)
         run(command, env, args.dry_run)
     return 0
 

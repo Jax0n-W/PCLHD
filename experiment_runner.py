@@ -15,6 +15,9 @@ import shlex
 import subprocess
 import sys
 
+from clustercontrast.aerial_merge import (
+    add_aerial_merge_arguments, aerial_merge_cli_args,
+    aerial_merge_log_suffix, validate_aerial_merge_args)
 from clustercontrast.utils.data.resolution_augment import (
     add_resolution_augment_arguments, append_resolution_log_suffix,
     resolution_log_suffix, validate_resolution_augment_args)
@@ -205,6 +208,7 @@ def build_parser():
         default="ground_knn")
     parser.add_argument("--bridge-topk", type=int, default=10)
     parser.add_argument("--bridge-ratio", type=float, default=0.50)
+    add_aerial_merge_arguments(parser)
     parser.add_argument(
         "--bgm-fallback", choices=("pclhd", "nearest"), default="pclhd")
     parser.add_argument("--cross-retain-start", type=float, default=0.4)
@@ -331,18 +335,20 @@ def default_log_names(args, spec=None):
         "{}_s1_d{}{}{}_channel_off_seed{}".format(
             prefix, d_flag, agva_tag, aspect_tag, args.seed))
     fallback_suffix = "_nnfb" if args.bgm_fallback == "nearest" else ""
+    merge_suffix = aerial_merge_log_suffix(args)
     if spec.get("confident_cross", False):
         stage2 = args.stage2_log_name or (
-            "{}_{}_d{}{}{}_cr{}-{}r{}{}_channel_off_s2_seed{}".format(
+            "{}_{}_d{}{}{}_cr{}-{}r{}{}{}_channel_off_s2_seed{}".format(
                 prefix, args.experiment, d_flag, agva_tag, aspect_tag,
                 str(float(args.cross_retain_start)),
                 str(float(args.cross_retain_end)),
-                args.cross_retain_ramp_epochs, fallback_suffix, args.seed))
+                args.cross_retain_ramp_epochs, fallback_suffix, merge_suffix,
+                args.seed))
     elif spec.get("bridge", False):
         stage2 = args.stage2_log_name or (
-            "{}_{}_d{}{}{}_b1{}_channel_off_s2_seed{}".format(
+            "{}_{}_d{}{}{}_b1{}{}_channel_off_s2_seed{}".format(
                 prefix, args.experiment, d_flag, agva_tag, aspect_tag,
-                fallback_suffix, args.seed))
+                fallback_suffix, merge_suffix, args.seed))
     else:
         stage2 = args.stage2_log_name or (
             "{}_{}_d{}{}{}_t{}_channel_off_s2_seed{}".format(
@@ -547,6 +553,7 @@ def build_stage2_command(args, checkpoint, stage1_log_name=None,
             ]
         if args.log_gt_match_accuracy:
             command.append("--log-gt-match-accuracy")
+        command += aerial_merge_cli_args(args)
         command += _resolution_args(args)
         command += _aspect_jitter_args(args, 2)
         if args.eps_all is not None:
@@ -646,6 +653,7 @@ def checkpoint_path(args, stage1_log_name):
 def validate_args(args):
     resolve_dataset_paths(args)
     spec = get_experiment_spec(args.experiment)
+    validate_aerial_merge_args(args, supports_bridge=spec.get("bridge", False))
     validate_resolution_augment_args(args)
     validate_aspect_jitter_args(args)
     if args.run_mode == "stage2" and not args.stage1_checkpoint:
@@ -814,6 +822,10 @@ def _print_config(args, spec, stage1_log_name, stage2_log_name):
         print("Bridge ratio (within each cluster): {}".format(
             effective_bridge_ratio))
         print("BGM fallback: {}".format(args.bgm_fallback))
+        if args.aerial_merge != "off":
+            print("Aerial merge (Stage 2): mode={}, tau={:g}, lambda={:g}"
+                  .format(args.aerial_merge, args.aerial_merge_tau,
+                          args.aerial_merge_lambda))
         print("Bridge GT match diagnostics: {}".format(
             args.log_gt_match_accuracy))
         if args.bridge_score == "view_csv":

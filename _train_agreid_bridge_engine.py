@@ -2,8 +2,8 @@
 """AG-ReID Stage 2 with cluster-selected aerial bridge prototypes.
 
 This entry keeps baseline Stage-2 clustering, CMhard memories, no-EMA-loss
-trainer, ALL-memory optimization, EMA update, evaluation and checkpoints.  It
-changes only the aerial prototype used by bipartite graph matching.
+trainer, ALL-memory optimization, EMA update, evaluation and checkpoints.
+It supports aerial bridge prototypes and optional aerial cluster consolidation.
 """
 
 from __future__ import absolute_import, print_function
@@ -21,6 +21,9 @@ import torch.nn.functional as F
 from torch.backends import cudnn
 
 from ChannelAug import ChannelRandomErasing
+from clustercontrast.aerial_merge import (
+    add_aerial_merge_arguments, merge_aerial_clusters, merge_gt_stats,
+    validate_aerial_merge_args)
 from clustercontrast.bridge_matching import (
     BGM_FALLBACK_MODES, BRIDGE_SCORE_MODES, CROSS_CONFIDENCE_MODES,
     bridge_centers, bridge_scores, bridge_selection_stats,
@@ -89,6 +92,7 @@ def _resolve_project_path(path):
 
 
 def _validate_args(args):
+    validate_aerial_merge_args(args)
     if args.channel_adap_gray != "off":
         raise ValueError("Channel augmentation is fixed off in this release")
     if args.bridge_score not in BRIDGE_SCORE_MODES:
@@ -320,6 +324,31 @@ def main_worker_stage2(args):
                 labels_all, num_all = _adaptive_cluster(
                     cluster_all, distance_all, "ALL")
                 del distance_all
+
+        if args.aerial_merge != "off":
+            old_labels_aerial = labels_aerial
+            labels_aerial, num_aerial, merge_stats = merge_aerial_clusters(
+                features_aerial, old_labels_aerial, args.aerial_merge,
+                tau=args.aerial_merge_tau, lam=args.aerial_merge_lambda)
+            if args.aerial_merge == "threshold":
+                cutoff = "tau={:g}".format(args.aerial_merge_tau)
+            else:
+                cutoff = "lam={:g}, median_compactness={:.6f}".format(
+                    args.aerial_merge_lambda, merge_stats["median_compactness"])
+            print("Aerial merge epoch {}: mode={}, {}, clusters {}->{}, "
+                  "merges={}, groups>=2={}, largest_group={}".format(
+                      epoch, args.aerial_merge, cutoff,
+                      merge_stats["clusters_before"], num_aerial,
+                      merge_stats["merges"], merge_stats["merged_groups"],
+                      merge_stats["largest_group"]))
+            if args.log_gt_match_accuracy:
+                gt = merge_gt_stats(
+                    old_labels_aerial, labels_aerial,
+                    [sample[0] for sample in aerial_train])
+                print("[GT Aerial Merge] pair_precision={:.6f}, "
+                      "merged_pairs={}, bcubed_f {:.6f}->{:.6f}".format(
+                          gt["pair_precision"], gt["merged_pairs"],
+                          gt["bcubed_before"]["f"], gt["bcubed_after"]["f"]))
 
         memory_aerial, centers_aerial, num_aerial = _create_hard_memory(
             model, args, labels_aerial, features_aerial,
@@ -582,6 +611,7 @@ def build_parser():
         default="ground_knn")
     parser.add_argument("--bridge-topk", type=int, default=10)
     parser.add_argument("--bridge-ratio", type=float, default=0.5)
+    add_aerial_merge_arguments(parser)
     parser.add_argument(
         "--bgm-fallback", choices=BGM_FALLBACK_MODES, default="pclhd")
     parser.add_argument("--confident-cross", action="store_true")
