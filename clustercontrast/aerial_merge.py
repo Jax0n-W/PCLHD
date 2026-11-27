@@ -23,6 +23,9 @@ def add_aerial_merge_arguments(parser):
     parser.add_argument("--aerial-merge-lambda", type=float,
                         default=DEFAULT_LAMBDA,
                         help="compactness multiplier in adaptive mode")
+    parser.add_argument("--aerial-merge-scope", choices=("labels", "association"),
+                        default="labels",
+                        help="use merged clusters for labels or only for association")
 
 
 def _validate_merge_options(mode, tau, lam):
@@ -34,30 +37,44 @@ def _validate_merge_options(mode, tau, lam):
         raise ValueError("--aerial-merge-lambda must be finite and nonnegative")
 
 
-def validate_aerial_merge_args(args, supports_bridge=True):
+def aerial_merge_association_only(args):
+    return (args.aerial_merge != "off"
+            and getattr(args, "aerial_merge_scope", "labels") == "association")
+
+
+def validate_aerial_merge_args(args, supports_bridge=True, *, bridge_ratio=None):
     if args.aerial_merge != "off" and not supports_bridge:
         raise ValueError(
             "--aerial-merge requires a bridge-engine experiment. "
             "Use --experiment bridge --bridge-ratio 1.0 for baseline + merge.")
     _validate_merge_options(
         args.aerial_merge, args.aerial_merge_tau, args.aerial_merge_lambda)
+    if aerial_merge_association_only(args):
+        ratio = args.bridge_ratio if bridge_ratio is None else bridge_ratio
+        if abs(ratio - 1.0) > 1e-12:
+            raise ValueError(
+                "--aerial-merge-scope association requires --bridge-ratio 1.0")
 
 
 def aerial_merge_cli_args(args):
     if args.aerial_merge == "off":
         return []
-    return [
+    command = [
         "--aerial-merge", args.aerial_merge,
         "--aerial-merge-tau", str(args.aerial_merge_tau),
         "--aerial-merge-lambda", str(args.aerial_merge_lambda),
     ]
+    if aerial_merge_association_only(args):
+        command += ["--aerial-merge-scope", args.aerial_merge_scope]
+    return command
 
 
 def aerial_merge_log_suffix(args):
+    scope_suffix = "as" if aerial_merge_association_only(args) else ""
     if args.aerial_merge == "threshold":
-        return "_am{:g}".format(args.aerial_merge_tau)
+        return "_am{:g}".format(args.aerial_merge_tau) + scope_suffix
     if args.aerial_merge == "adaptive":
-        return "_ama{:g}".format(args.aerial_merge_lambda)
+        return "_ama{:g}".format(args.aerial_merge_lambda) + scope_suffix
     return ""
 
 
@@ -138,6 +155,34 @@ def merge_aerial_clusters(features, labels, mode, tau=DEFAULT_TAU,
         largest_group=int(group_sizes.max()),
     )
     return new_labels, num_after, stats
+
+
+def fragment_groups(fragment_labels, merged_labels):
+    """Map each non-outlier fragment to its merged group."""
+    return {int(fragment): int(group)
+            for fragment, group in zip(fragment_labels, merged_labels)
+            if fragment != -1}
+
+
+@torch.no_grad()
+def translate_group_mappings(group_of, i2r_m, r2i_m, centers_aerial,
+                             centers_ground):
+    """Translate group mappings to (fragment-to-ground, ground-to-fragment)."""
+    i2r = {fragment: i2r_m[group] for fragment, group in group_of.items()
+           if group in i2r_m}
+    r2i = {}
+    if r2i_m:
+        fragments_by_group = defaultdict(list)
+        for fragment in sorted(group_of):
+            fragments_by_group[group_of[fragment]].append(fragment)
+        aerial = F.normalize(centers_aerial, dim=1)
+        ground = F.normalize(centers_ground, dim=1)
+        for ground_id, group in r2i_m.items():
+            fragments = fragments_by_group[group]
+            similarity = aerial[fragments] @ ground[ground_id]
+            # argmax selects the first maximum in ascending fragment ID order.
+            r2i[ground_id] = fragments[int(similarity.argmax().item())]
+    return i2r, r2i
 
 
 def _bcubed(identities_by_cluster, identity_counts):

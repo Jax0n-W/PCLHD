@@ -8,12 +8,15 @@ from unittest.mock import patch
 import numpy as np
 import torch
 
+import _train_agreid_bridge_engine as bridge_engine
 import experiment_runner as runner
-from clustercontrast.aerial_merge import merge_aerial_clusters, merge_gt_stats
+from clustercontrast.aerial_merge import (
+    aerial_merge_association_only, fragment_groups, merge_aerial_clusters,
+    merge_gt_stats, translate_group_mappings)
 from scripts import run_all_ablations as batch_runner
 
 
-def runner_snapshot(module, dataset):
+def runner_snapshot(module, dataset, include_merge_modes=False):
     """Hash names and commands with machine-specific paths normalized."""
     path_flags = {
         "--data-dir", "--logs-dir", "--dynamic-agva-mask-dir",
@@ -27,13 +30,21 @@ def runner_snapshot(module, dataset):
 
     results = {}
     for experiment in sorted(module.EXPERIMENTS):
-        args = module.build_parser().parse_args([
-            "--dataset-key", dataset, "--experiment", experiment, "--dry-run"])
-        results[experiment] = (
-            module.default_log_names(args),
-            normalize(module.build_stage1_command(args)),
-            normalize(module.build_stage2_command(args, "model_best.pth.tar")),
-        )
+        cases = [(experiment, [])]
+        if include_merge_modes and module.EXPERIMENTS[experiment].get("bridge"):
+            cases.extend([
+                (experiment + "/threshold", ["--aerial-merge", "threshold"]),
+                (experiment + "/adaptive", ["--aerial-merge", "adaptive"]),
+            ])
+        for name, extra in cases:
+            args = module.build_parser().parse_args([
+                "--dataset-key", dataset, "--experiment", experiment, "--dry-run"]
+                + extra)
+            results[name] = (
+                module.default_log_names(args),
+                normalize(module.build_stage1_command(args)),
+                normalize(module.build_stage2_command(args, "model_best.pth.tar")),
+            )
     return hashlib.sha256(json.dumps(
         results, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
@@ -182,6 +193,94 @@ class AerialMergeRunnerTests(unittest.TestCase):
                 batch_runner.main([
                     "--experiments", "bridge", "baseline",
                     "--aerial-merge", "threshold", "--dry-run"])
+            run.assert_not_called()
+
+
+class AerialMergeAssociationTests(unittest.TestCase):
+    def test_translate_expands_retained_groups_and_picks_nearest_fragment(self):
+        group_of = fragment_groups([2, 1, -1, 0, 1], [1, 0, -1, 0, 0])
+        self.assertEqual(group_of, {0: 0, 1: 0, 2: 1})
+        aerial = torch.tensor([[10.0, 0.0], [0.0, 2.0], [0.0, -1.0]])
+        ground = torch.zeros(6, 2)
+        ground[5] = torch.tensor([1.0, 3.0])
+        i2r, r2i = translate_group_mappings(
+            group_of, {0: 5}, {5: 0}, aerial, ground)
+        self.assertEqual(i2r, {0: 5, 1: 5})
+        self.assertEqual(r2i, {5: 1})
+
+    def test_translate_breaks_cosine_ties_by_smallest_fragment_id(self):
+        aerial = torch.tensor([[1.0, 0.0], [2.0, 0.0], [0.0, 1.0]])
+        ground = torch.tensor([[1.0, 0.0]])
+        i2r, r2i = translate_group_mappings(
+            {1: 0, 0: 0, 2: 1}, {}, {0: 0}, aerial, ground)
+        self.assertEqual(i2r, {})
+        self.assertEqual(r2i, {0: 0})
+
+    def test_engine_validates_ratio_only_when_association_is_active(self):
+        args = bridge_engine.build_parser().parse_args([
+            "--stage1-checkpoint", "model_best.pth.tar",
+            "--aerial-merge-scope", "association", "--bridge-ratio", "0.5"])
+        bridge_engine._validate_args(args)
+        self.assertFalse(aerial_merge_association_only(args))
+        self.assertIs(bridge_engine._stage2_trainer_class(args),
+                      bridge_engine.ClusterContrastTrainer_PCLMP_NoEMALoss)
+        args.aerial_merge = "threshold"
+        with self.assertRaisesRegex(ValueError, "--bridge-ratio 1.0"):
+            bridge_engine._validate_args(args)
+        args.bridge_ratio = 1.0
+        bridge_engine._validate_args(args)
+        self.assertIs(bridge_engine._stage2_trainer_class(args),
+                      bridge_engine.ClusterContrastTrainer_PCLMP_ConfidentCross)
+
+    def test_runner_reuses_previous_names_and_commands(self):
+        # ac32c6f snapshots include off, threshold and adaptive label merging.
+        for dataset, expected in {
+                "agreid": "01fd6a796fbc2c41fa9cc0b6e2f988e806fa302eb4650e5ebd26d401a0cd5429",
+                "agreidv2": "3756db57796ae41aa0b3901a6f71d6ac07ba40e3f73ce9355e1631bcde64ad8c",
+        }.items():
+            with self.subTest(dataset=dataset):
+                self.assertEqual(runner_snapshot(runner, dataset, True), expected)
+
+    def test_runner_suffix_scope_and_effective_bridge_ratio(self):
+        for mode, suffix in (("threshold", "_am0.7as"), ("adaptive", "_ama0.85as")):
+            with self.subTest(mode=mode):
+                args = runner.build_parser().parse_args([
+                    "--experiment", "confident", "--aerial-merge", mode,
+                    "--aerial-merge-lambda", "0.85",
+                    "--aerial-merge-scope", "association", "--dry-run"])
+                runner.validate_args(args)
+                self.assertIn(suffix + "_channel_off", runner.default_log_names(args)[1])
+                stage1 = runner.build_stage1_command(args)
+                stage2 = runner.build_stage2_command(args, "model_best.pth.tar")
+                self.assertNotIn("--aerial-merge-scope", stage1)
+                self.assertEqual(stage2[stage2.index("--aerial-merge-scope") + 1],
+                                 "association")
+                engine_args = bridge_engine.build_parser().parse_args(stage2[2:])
+                self.assertEqual(engine_args.bridge_ratio, 1.0)
+                bridge_engine._validate_args(engine_args)
+                args.experiment = "bridge"
+                with self.assertRaisesRegex(ValueError, "--bridge-ratio 1.0"):
+                    runner.validate_args(args)
+                args.aerial_merge = "off"
+                runner.validate_args(args)
+                self.assertNotIn(suffix, runner.default_log_names(args)[1])
+                self.assertNotIn("--aerial-merge-scope", runner.build_stage2_command(
+                    args, "model_best.pth.tar"))
+
+    def test_batch_forwards_association_scope_only_to_stage2(self):
+        arguments = ["--experiments", "dynamic_confident", "--dry-run",
+                     "--aerial-merge", "threshold",
+                     "--aerial-merge-scope", "association"]
+        with patch.object(batch_runner, "run") as run:
+            batch_runner.main(arguments)
+        stage1, stage2 = (call.args[0] for call in run.call_args_list)
+        self.assertNotIn("--aerial-merge-scope", stage1)
+        self.assertEqual(stage2[stage2.index("--aerial-merge-scope") + 1],
+                         "association")
+        arguments[1] = "dynamic_bridge"
+        with patch.object(batch_runner, "run") as run:
+            with self.assertRaisesRegex(ValueError, "--bridge-ratio 1.0"):
+                batch_runner.main(arguments)
             run.assert_not_called()
 
 

@@ -160,9 +160,11 @@ def stage1_checkpoint(args, dynamic):
 def main(argv=None):
     args = build_parser().parse_args(argv)
     selected = list(dict.fromkeys(args.experiments))
+    specs = [get_experiment_spec(name) for name in selected]
     validate_aerial_merge_args(
-        args, supports_bridge=all(
-            get_experiment_spec(name).get("bridge", False) for name in selected))
+        args, supports_bridge=all(spec.get("bridge", False) for spec in specs),
+        bridge_ratio=1.0 if all(spec.get("confident_cross", False)
+                                for spec in specs) else args.bridge_ratio)
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
     env.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")

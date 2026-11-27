@@ -22,7 +22,8 @@ from torch.backends import cudnn
 
 from ChannelAug import ChannelRandomErasing
 from clustercontrast.aerial_merge import (
-    add_aerial_merge_arguments, merge_aerial_clusters, merge_gt_stats,
+    add_aerial_merge_arguments, aerial_merge_association_only, fragment_groups,
+    merge_aerial_clusters, merge_gt_stats, translate_group_mappings,
     validate_aerial_merge_args)
 from clustercontrast.bridge_matching import (
     BGM_FALLBACK_MODES, BRIDGE_SCORE_MODES, CROSS_CONFIDENCE_MODES,
@@ -32,7 +33,7 @@ from clustercontrast.bridge_matching import (
     select_near_members)
 from clustercontrast.models.cm import ClusterMemory
 from clustercontrast.three_domain import (
-    build_bidirectional_bgm, generate_joint_cluster_features,
+    build_bidirectional_bgm, generate_cluster_features, generate_joint_cluster_features,
     joint_cross_modal_flags)
 from clustercontrast.trainers_no_ema_loss import \
     ClusterContrastTrainer_PCLMP_NoEMALoss
@@ -217,6 +218,15 @@ def _match_centers(args, ground_centers, aerial_centers):
     return build_bidirectional_bgm(ground_centers, aerial_centers)
 
 
+def _stage2_trainer_class(args):
+    # PCLHD can return a partial map when there are many more ground
+    # clusters than merged groups. The trainer supports partial maps even
+    # when confidence filtering is disabled.
+    if args.confident_cross or aerial_merge_association_only(args):
+        return ClusterContrastTrainer_PCLMP_ConfidentCross
+    return ClusterContrastTrainer_PCLMP_NoEMALoss
+
+
 def main_worker_stage2(args):
     _require_baseline()
     start_time = time.monotonic()
@@ -261,9 +271,8 @@ def main_worker_stage2(args):
         weight_decay=args.weight_decay)
     lr_scheduler = torch.optim.lr_scheduler.StepLR(
         optimizer, step_size=args.step_size, gamma=0.1)
-    trainer_class = (ClusterContrastTrainer_PCLMP_ConfidentCross
-                     if args.confident_cross
-                     else ClusterContrastTrainer_PCLMP_NoEMALoss)
+    association_only = aerial_merge_association_only(args)
+    trainer_class = _stage2_trainer_class(args)
     trainer = trainer_class(model, model_ema)
 
     clusterers = baseline.build_agreid_stage2_clusterers(args)
@@ -325,11 +334,16 @@ def main_worker_stage2(args):
                     cluster_all, distance_all, "ALL")
                 del distance_all
 
+        group_of = None
         if args.aerial_merge != "off":
             old_labels_aerial = labels_aerial
-            labels_aerial, num_aerial, merge_stats = merge_aerial_clusters(
+            merged_labels, num_merged, merge_stats = merge_aerial_clusters(
                 features_aerial, old_labels_aerial, args.aerial_merge,
                 tau=args.aerial_merge_tau, lam=args.aerial_merge_lambda)
+            if association_only:
+                group_of = fragment_groups(old_labels_aerial, merged_labels)
+            else:
+                labels_aerial, num_aerial = merged_labels, num_merged
             if args.aerial_merge == "threshold":
                 cutoff = "tau={:g}".format(args.aerial_merge_tau)
             else:
@@ -338,12 +352,12 @@ def main_worker_stage2(args):
             print("Aerial merge epoch {}: mode={}, {}, clusters {}->{}, "
                   "merges={}, groups>=2={}, largest_group={}".format(
                       epoch, args.aerial_merge, cutoff,
-                      merge_stats["clusters_before"], num_aerial,
+                      merge_stats["clusters_before"], num_merged,
                       merge_stats["merges"], merge_stats["merged_groups"],
                       merge_stats["largest_group"]))
             if args.log_gt_match_accuracy:
                 gt = merge_gt_stats(
-                    old_labels_aerial, labels_aerial,
+                    old_labels_aerial, merged_labels,
                     [sample[0] for sample in aerial_train])
                 print("[GT Aerial Merge] pair_precision={:.6f}, "
                       "merged_pairs={}, bcubed_f {:.6f}->{:.6f}".format(
@@ -385,14 +399,23 @@ def main_worker_stage2(args):
                 features_aerial, labels_aerial, near_mask)
         selection = bridge_selection_stats(
             labels_aerial, scores, near_mask)
+        num_matching_aerial = num_aerial
+        if association_only:
+            centers_bridge = generate_cluster_features(
+                merged_labels, features_aerial)
+            num_matching_aerial = num_merged
 
         # source=ground, target=aerial preserves baseline r2i/i2r direction.
         r2i, i2r, bridge_bgm_stats = _match_centers(
             args, centers_ground, centers_bridge)
         full_r2i, full_i2r, full_bgm_stats = _match_centers(
             args, centers_ground, centers_aerial)
+        diagnostic_i2r = i2r
+        if association_only:
+            diagnostic_i2r, _ = translate_group_mappings(
+                group_of, i2r, {}, centers_aerial, centers_ground)
         difference = matching_difference_stats(
-            i2r, full_i2r, cluster_ids=range(num_aerial))
+            diagnostic_i2r, full_i2r, cluster_ids=range(num_aerial))
         print("==> Bridge clusters epoch {}: Aerial={}, Ground={}, ALL={}".format(
             epoch, num_aerial, num_ground, num_all))
         print("Bridge selection: near={}, far={}, outliers={}, "
@@ -410,18 +433,18 @@ def main_worker_stage2(args):
             ground_names = [sample[0] for sample in ground_train]
             _format_accuracy("bridge centers", gt_match_accuracy(
                 labels_aerial, aerial_names, labels_ground, ground_names,
-                i2r))
+                diagnostic_i2r))
             _format_accuracy("full centers", gt_match_accuracy(
                 labels_aerial, aerial_names, labels_ground, ground_names,
                 full_i2r))
 
         if args.confident_cross:
-            if args.bgm_fallback == "pclhd" and num_ground < num_aerial:
+            if args.bgm_fallback == "pclhd" and num_ground < num_matching_aerial:
                 print(
                     "WARNING: ground clusters ({}) < aerial clusters ({}); "
                     "cross-view loss is disabled this epoch. "
                     "Use --bgm-fallback nearest.".format(
-                        num_ground, num_aerial))
+                        num_ground, num_matching_aerial))
             retain_ratio = cross_retain_ratio(
                 epoch, args.cross_retain_start, args.cross_retain_end,
                 args.cross_retain_ramp_epochs)
@@ -431,7 +454,7 @@ def main_worker_stage2(args):
                     mode=args.cross_confidence)
             retained_i2r, removed_i2r, i2r_stats = \
                 retain_mapping_by_confidence(
-                    i2r, i2r_confidence, retain_ratio, num_aerial)
+                    i2r, i2r_confidence, retain_ratio, num_matching_aerial)
             retained_r2i, removed_r2i, r2i_stats = \
                 retain_mapping_by_confidence(
                     r2i, r2i_confidence, retain_ratio, num_ground)
@@ -448,6 +471,14 @@ def main_worker_stage2(args):
                       r2i_stats["retained"], r2i_stats["total_clusters"],
                       r2i_stats["available"],
                       r2i_stats["mean_confidence"]))
+            if association_only:
+                retained_i2r, retained_r2i = translate_group_mappings(
+                    group_of, retained_i2r, retained_r2i,
+                    centers_aerial, centers_ground)
+                if args.log_gt_match_accuracy:
+                    removed_i2r, removed_r2i = translate_group_mappings(
+                        group_of, removed_i2r, removed_r2i,
+                        centers_aerial, centers_ground)
             if args.log_gt_match_accuracy:
                 _format_accuracy("retained i2r", gt_match_accuracy(
                     labels_aerial, aerial_names,
@@ -463,6 +494,14 @@ def main_worker_stage2(args):
                     labels_aerial, aerial_names, removed_r2i))
             i2r = retained_i2r
             r2i = retained_r2i
+        elif association_only:
+            i2r, r2i = translate_group_mappings(
+                group_of, i2r, r2i, centers_aerial, centers_ground)
+
+        if association_only:
+            print("Aerial merge scope=association: fragments={}, groups={}, "
+                  "i2r(fragment)={}, r2i={}".format(
+                      num_aerial, num_matching_aerial, len(i2r), len(r2i)))
 
         pseudo_aerial = [
             (fname, int(label), cid)

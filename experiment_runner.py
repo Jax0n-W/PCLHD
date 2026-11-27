@@ -653,7 +653,9 @@ def checkpoint_path(args, stage1_log_name):
 def validate_args(args):
     resolve_dataset_paths(args)
     spec = get_experiment_spec(args.experiment)
-    validate_aerial_merge_args(args, supports_bridge=spec.get("bridge", False))
+    validate_aerial_merge_args(
+        args, supports_bridge=spec.get("bridge", False),
+        bridge_ratio=1.0 if spec.get("confident_cross", False) else args.bridge_ratio)
     validate_resolution_augment_args(args)
     validate_aspect_jitter_args(args)
     if args.run_mode == "stage2" and not args.stage1_checkpoint:
@@ -826,6 +828,7 @@ def _print_config(args, spec, stage1_log_name, stage2_log_name):
             print("Aerial merge (Stage 2): mode={}, tau={:g}, lambda={:g}"
                   .format(args.aerial_merge, args.aerial_merge_tau,
                           args.aerial_merge_lambda))
+            print("Aerial merge scope: {}".format(args.aerial_merge_scope))
         print("Bridge GT match diagnostics: {}".format(
             args.log_gt_match_accuracy))
         if args.bridge_score == "view_csv":
